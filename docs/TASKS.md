@@ -2,11 +2,14 @@
 
 ## Milestone 1: Boot
 
-- [ ] Fresh Zig project following the established code style in AGENTS.md
-- [ ] Architecture- and platform-independent foundations.
-- [ ] x86_64 UEFI boot from removable media.
-- [ ] Serial diagnostics.
-- [ ] Boot in VMware and on the initial Coffee Lake desktop.
+- [x] Fresh Zig project following the established code style in AGENTS.md
+- [x] Architecture- and platform-independent foundations.
+- [x] x86_64 UEFI boot from removable media.
+- [x] Serial diagnostics.
+- [x] Boot in VMware (UEFI ISO and GPT/FAT32 disk).
+- [ ] Boot on the initial Coffee Lake desktop (physical validation is deferred).
+
+Implementation, handoff contract, and validation details: [BOOT.md](BOOT.md).
 
 ## Milestone 2: Kernel
 

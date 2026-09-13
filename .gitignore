@@ -1,1 +1,7 @@
 AGENTS.md
+
+.tools/
+
+.zig-cache/
+zig-out/
+__pycache__/
