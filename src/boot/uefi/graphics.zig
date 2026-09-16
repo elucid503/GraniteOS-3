@@ -14,8 +14,6 @@ pub fn capture(services: *uefi.tables.BootServices) !?boot.Framebuffer {
 
     const info = mode.info;
 
-    if (info.pixel_format == .blt_only) return null;
-
     const masks: Graphics.PixelBitmask = switch (info.pixel_format) {
 
         .red_green_blue_reserved_8_bit_per_color => .{

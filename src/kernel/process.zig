@@ -76,21 +76,14 @@ pub const Process = struct {
 
             while (virtual < end) : (virtual += 4096) {
 
-                const physical = try kernel.frames.alloc();
-                errdefer kernel.frames.release(physical) catch @panic("Image page ownership");
-
+                const flags: u64 = paging.user | (if (segment.flags & 2 != 0) paging.writable else @as(u64, 0)) | (if (segment.flags & 1 == 0) paging.nx else @as(u64, 0));
+                const physical = try space.allocate(@intCast(virtual), flags);
                 const page: *[4096]u8 = @ptrFromInt(physical);
-
-                @memset(page, 0);
 
                 const first = @max(virtual, segment.address);
                 const last = @min(virtual + 4096, segment.address + segment.file_size);
 
                 if (first < last) @memcpy(page[first - virtual .. last - virtual], bytes[segment.offset + first - segment.address .. segment.offset + last - segment.address]);
-
-                const flags: u64 = paging.user | (if (segment.flags & 2 != 0) paging.writable else @as(u64, 0)) | (if (segment.flags & 1 == 0) paging.nx else @as(u64, 0));
-
-                try space.map(@intCast(virtual), physical, flags);
 
             }
 
@@ -98,11 +91,7 @@ pub const Process = struct {
 
         for (0..4) |index| {
 
-            const physical = try kernel.frames.alloc();
-            errdefer kernel.frames.release(physical) catch @panic("Stack ownership");
-
-            @memset(@as(*[4096]u8, @ptrFromInt(physical)), 0);
-            try space.map(stack_top - (index + 1) * 4096, physical, paging.user | paging.writable | paging.nx);
+            _ = try space.allocate(stack_top - (index + 1) * 4096, paging.user | paging.writable | paging.nx);
 
         }
 

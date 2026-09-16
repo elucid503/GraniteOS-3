@@ -48,11 +48,23 @@ pub const Space = struct {
         if (address % 4096 != 0 or physical % 4096 != 0 or address >= user_end or physical >= memory.physical_limit) return error.InvalidAddress;
         if (flags & user != 0 and (address < user_base or flags & (writable | nx) == writable)) return error.PermissionDenied;
 
-        const entry = try self.leaf(address, true, flags & user);
+        const entry = try self.walk(address, 12, true, flags & user);
 
         if (entry.* & 1 != 0) return error.AlreadyMapped;
 
         entry.* = physical | flags | 1;
+
+    }
+
+    pub fn allocate(self: *Space, address: usize, flags: u64) MapError!usize {
+
+        const physical = try self.frames.alloc();
+        errdefer self.frames.release(physical) catch @panic("Page ownership");
+
+        @memset(@as(*[memory.page_size]u8, @ptrFromInt(physical)), 0);
+        try self.map(address, physical, flags);
+
+        return physical;
 
     }
 
@@ -66,31 +78,7 @@ pub const Space = struct {
 
         while (address < end) : (address += 0x200000) {
 
-            var current = table(self.root);
-
-            for ([_]u6{
-
-                39,
-                30,
-
-            }) |shift| {
-
-                const entry = &current[(address >> shift) & 511];
-
-                if (entry.* & 1 == 0) {
-
-                    const next = try self.frames.alloc();
-
-                    @memset(table(next), 0);
-                    entry.* = next | 3;
-
-                }
-
-                current = table(entry.* & mask);
-
-            }
-
-            const entry = &current[(address >> 21) & 511];
+            const entry = try self.walk(address, 21, true, 0);
 
             if (entry.* == 0) entry.* = address | flags | 0x81;
 
@@ -100,7 +88,7 @@ pub const Space = struct {
 
     pub fn protect(self: *Space, address: usize, flags: u64) MapError!void {
 
-        const entry = try self.leaf(address, false, 0);
+        const entry = try self.walk(address, 12, false, 0);
 
         if (entry.* & 1 == 0) return error.NotMapped;
 
@@ -139,7 +127,7 @@ pub const Space = struct {
 
     pub fn guard(self: *Space, address: usize) MapError!void {
 
-        const entry = try self.leaf(address, false, 0);
+        const entry = try self.walk(address, 12, false, 0);
 
         entry.* = 0;
 
@@ -174,7 +162,7 @@ pub const Space = struct {
 
         if (address < user_base or address >= user_end or address % 4096 != 0) return error.InvalidAddress;
 
-        const entry = try self.leaf(address, false, 0);
+        const entry = try self.walk(address, 12, false, 0);
 
         if (entry.* & 1 == 0) return error.NotMapped;
 
@@ -219,17 +207,12 @@ pub const Space = struct {
 
     }
 
-    fn leaf(self: *Space, address: usize, create: bool, flags: u64) MapError!*u64 {
+    fn walk(self: *Space, address: usize, level: u6, create: bool, flags: u64) MapError!*u64 {
 
         var current = table(self.root);
+        var shift: u6 = 39;
 
-        for ([_]u6{
-
-            39,
-            30,
-            21,
-
-        }) |shift| {
+        while (shift > level) : (shift -= 9) {
 
             const entry = &current[(address >> shift) & 511];
 
@@ -257,7 +240,7 @@ pub const Space = struct {
 
         }
 
-        return &current[(address >> 12) & 511];
+        return &current[(address >> level) & 511];
 
     }
 
@@ -271,6 +254,13 @@ pub fn table(address: usize) *Table {
 
 pub fn activate(root: usize) void {
 
-    asm volatile ("mov %[root], %%cr3" : : [root] "r" (root), : .{ .memory = true, });
+    asm volatile ("mov %[root], %%cr3" // Activate these page tables; flush the TLB.
+        :
+        : [root] "r" (root),
+        : .{
+
+            .memory = true,
+
+        });
 
 }

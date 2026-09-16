@@ -29,7 +29,9 @@ pub fn prepare(log: Log) !*const boot.Info {
 
     info.* = .{
 
-        .memory = &.{ },
+        .memory = &.{
+
+        },
 
         .image = .{
 

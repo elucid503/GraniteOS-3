@@ -7,7 +7,7 @@ const uefi = std.os.uefi;
 const Descriptor = uefi.tables.MemoryDescriptor;
 const Services = uefi.tables.BootServices;
 
-const MapError = error{InvalidMemoryMap, MemoryMapUnstable, MemoryMapReadFailed, ExitBootServicesFailed};
+const MapError = error{ InvalidMemoryMap, MemoryMapUnstable, MemoryMapReadFailed, ExitBootServicesFailed };
 
 pub const Map = struct {
 
@@ -32,14 +32,9 @@ pub const Map = struct {
 
         const status = services._getMemoryMap(&size, null, &key, &stride, &version);
 
-        if (status != .buffer_too_small or stride < @sizeOf(Descriptor) or size == 0) {
+        if (status != .buffer_too_small or stride < @sizeOf(Descriptor) or size == 0) return MapError.InvalidMemoryMap;
 
-            return MapError.InvalidMemoryMap;
-
-        }
-
-        // Extra descriptors cover allocations and firmware exit callbacks without allocating on retry.
-
+        // Spare descriptors cover allocations and exit callbacks without allocating on retry.
         const capacity = try std.math.add(usize, size, try std.math.mul(usize, stride, 32));
         const buffer = try services.allocatePool(.loader_data, capacity);
 
@@ -82,12 +77,7 @@ pub const Map = struct {
 
             const status = services._exitBootServices(handle, self.key);
 
-            if (status == .success) {
-
-                return try convert(self.buffer[0..self.size], self.stride, self.version, self.regions);
-
-            }
-
+            if (status == .success) return try convert(self.buffer[0..self.size], self.stride, self.version, self.regions);
             if (status != .invalid_parameter) return MapError.ExitBootServicesFailed;
 
         }
@@ -100,11 +90,7 @@ pub const Map = struct {
 
 fn validate(bytes: []const u8, stride: usize, version: u32) MapError!void {
 
-    if (version != 1 or stride < @sizeOf(Descriptor) or bytes.len == 0 or bytes.len % stride != 0) {
-
-        return MapError.InvalidMemoryMap;
-
-    }
+    if (version != 1 or stride < @sizeOf(Descriptor) or bytes.len == 0 or bytes.len % stride != 0) return MapError.InvalidMemoryMap;
 
 }
 

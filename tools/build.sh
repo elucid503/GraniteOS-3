@@ -7,55 +7,26 @@ set -eu
 optimize=Debug
 
 while [ "$#" -gt 0 ]; do
-
     case $1 in
-
         --optimize|--python)
 
             [ "$#" -ge 2 ] || fail "$1 requires a value"
 
             case $1 in
-
-                --optimize)
-
-                    optimize=$2
-
-                ;;
-
-                --python)
-
-                    PYTHON=$2
-
-                ;;
-
+                --optimize) optimize=$2 ;;
+                --python) PYTHON=$2 ;;
             esac
 
             shift 2
 
         ;;
-
-        *)
-
-            fail 'Usage: sh tools/build.sh [--optimize Debug|ReleaseSafe|ReleaseFast|ReleaseSmall] [--python PATH]'
-
-        ;;
-
+        *) fail 'Usage: sh tools/build.sh [--optimize Debug|ReleaseSafe|ReleaseFast|ReleaseSmall] [--python PATH]' ;;
     esac
-
 done
 
 case $optimize in
-
-    Debug|ReleaseSafe|ReleaseFast|ReleaseSmall)
-
-    ;;
-
-    *)
-
-        fail 'Invalid optimization mode'
-
-    ;;
-
+    Debug|ReleaseSafe|ReleaseFast|ReleaseSmall) ;;
+    *) fail 'Invalid optimization mode' ;;
 esac
 
 find_python
@@ -64,9 +35,7 @@ zig=${ZIG:-$project/.tools/zig-$architecture-$platform-$version/zig}
 [ "$platform" != windows ] || zig=${ZIG:-$zig.exe}
 
 if [ ! -x "$zig" ] && [ -z "${ZIG:-}" ]; then
-
     zig=$(command -v zig) || fail 'Zig is missing; run sh tools/setup.sh first'
-
 fi
 
 [ "$("$zig" version)" = "$version" ] || fail "This project requires Zig $version"

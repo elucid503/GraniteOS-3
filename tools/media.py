@@ -12,16 +12,14 @@ DATA_SECTOR = RESERVED + 2 * FAT_SECTORS
 BLOCK = 2048
 IMAGE_BLOCK = 24
 
+
 def check_efi(data):
-
     if data[:2] != b"MZ" or len(data) < 64:
-
         raise ValueError("Input is not a PE executable")
 
     pe = struct.unpack_from("<I", data, 60)[0]
 
     if pe + 160 > len(data) or data[pe:pe + 4] != b"PE\0\0":
-
         raise ValueError("Invalid PE header")
 
     machine, = struct.unpack_from("<H", data, pe + 4)
@@ -29,33 +27,30 @@ def check_efi(data):
     subsystem, = struct.unpack_from("<H", data, pe + 92)
 
     if (machine, magic, subsystem) != (0x8664, 0x20B, 10):
-
         raise ValueError("Expected an x86_64 PE32+ EFI application")
 
-def directory_entry(name, attributes, cluster, size=0):
 
+def directory_entry(name, attributes, cluster, size=0):
     entry = bytearray(32)
     entry[:11] = name
     entry[11] = attributes
     date = ((2026 - 1980) << 9) | (1 << 5) | 1
 
-    struct.pack_into("<H", entry, 16, date)
-    struct.pack_into("<H", entry, 18, date)
+    struct.pack_into("<HH", entry, 16, date, date)
     struct.pack_into("<H", entry, 20, cluster >> 16)
     struct.pack_into("<H", entry, 24, date)
     struct.pack_into("<HI", entry, 26, cluster & 0xFFFF, size)
 
     return entry
 
-def fat_image(executable):
 
+def fat_image(executable):
     check_efi(executable)
 
     clusters = (len(executable) + SECTOR - 1) // SECTOR
     cluster_count = SECTORS - DATA_SECTOR
 
     if clusters + 3 > cluster_count:
-
         raise ValueError("EFI executable exceeds the boot volume")
 
     image = bytearray(SECTORS * SECTOR)
@@ -85,17 +80,14 @@ def fat_image(executable):
 
     fat = bytearray(FAT_SECTORS * SECTOR)
     for index, value in enumerate([0x0FFFFFF8, 0xFFFFFFFF, 0x0FFFFFFF, 0x0FFFFFFF, 0x0FFFFFFF]):
-
         struct.pack_into("<I", fat, index * 4, value)
 
     for index in range(clusters):
-
         cluster = 5 + index
         value = 0x0FFFFFFF if index == clusters - 1 else cluster + 1
         struct.pack_into("<I", fat, cluster * 4, value)
 
     for copy in range(2):
-
         start = (RESERVED + copy * FAT_SECTORS) * SECTOR
         image[start:start + len(fat)] = fat
 
@@ -103,12 +95,9 @@ def fat_image(executable):
     image[root:root + 32] = directory_entry(b"GRANITEOS  ", 8, 0)
     image[root + 32:root + 64] = directory_entry(b"EFI        ", 16, 3)
     for cluster, parent, name, child, size in [
-
         (3, 0, b"BOOT       ", 4, 0),
         (4, 3, b"BOOTX64 EFI", 5, len(executable)),
-
     ]:
-
         start = (DATA_SECTOR + cluster - 2) * SECTOR
         image[start:start + 32] = directory_entry(b".          ", 16, cluster)
         image[start + 32:start + 64] = directory_entry(b"..         ", 16, parent)
@@ -119,16 +108,16 @@ def fat_image(executable):
 
     return image
 
-def both16(value):
 
+def both16(value):
     return struct.pack("<H", value) + struct.pack(">H", value)
 
-def both32(value):
 
+def both32(value):
     return struct.pack("<I", value) + struct.pack(">I", value)
 
-def record(name, block, size, directory=False):
 
+def record(name, block, size, directory=False):
     result = bytearray(33 + len(name) + (len(name) % 2 == 0))
     result[0] = len(result)
     result[2:10] = both32(block)
@@ -141,8 +130,8 @@ def record(name, block, size, directory=False):
 
     return result
 
-def iso_image(fat):
 
+def iso_image(fat):
     total = IMAGE_BLOCK + (len(fat) + BLOCK - 1) // BLOCK
     image = bytearray(total * BLOCK)
 
@@ -164,7 +153,6 @@ def iso_image(fat):
     pvd[190:813] = b" " * 623
 
     for offset in (813, 830, 847, 864):
-
         pvd[offset:offset + 17] = b"2026010100000000\0"
 
     pvd[881] = 1
@@ -182,12 +170,10 @@ def iso_image(fat):
     image[20 * BLOCK:20 * BLOCK + 10] = struct.pack(">BBIHH", 1, 0, 21, 1, 0)
 
     root = b"".join([
-
         record(b"\0", 21, BLOCK, True),
         record(b"\1", 21, BLOCK, True),
         record(b"BOOT.CAT;1", 22, BLOCK),
         record(b"ESP.IMG;1", IMAGE_BLOCK, len(fat)),
-
     ])
     image[21 * BLOCK:21 * BLOCK + len(root)] = root
 
@@ -203,8 +189,8 @@ def iso_image(fat):
 
     return image
 
-def disk_image(fat):
 
+def disk_image(fat):
     start = 2048
     total = start + SECTORS + 2048
     image = bytearray(total * SECTOR)
@@ -222,16 +208,16 @@ def disk_image(fat):
 
     name = "GraniteOS Boot".encode("utf-16-le")
     entries[56:56 + len(name)] = name
+    entries_crc = zlib.crc32(entries)
 
     for current, backup, table in [(1, total - 1, 2), (total - 1, 1, total - 33)]:
-
         header = bytearray(SECTOR)
 
         struct.pack_into(
             "<8sIIIIQQQQ16sQIII", header, 0,
             b"EFI PART", 0x10000, 92, 0, 0, current, backup, 34, total - 34,
             uuid.UUID("ccefb72e-930c-421b-89d1-dd2fd90b3713").bytes_le,
-            table, 128, 128, zlib.crc32(entries),
+            table, 128, 128, entries_crc,
         )
 
         struct.pack_into("<I", header, 16, zlib.crc32(header[:92]))
@@ -241,13 +227,12 @@ def disk_image(fat):
 
     image[start * SECTOR:(start + SECTORS) * SECTOR] = fat
     for backup in (0, 6):
-
         struct.pack_into("<I", image, (start + backup) * SECTOR + 28, start)
 
     return image
 
-def main():
 
+def main():
     parser = argparse.ArgumentParser(description="Build FAT32, UEFI ISO, and GPT boot media")
     parser.add_argument("--efi", type=Path, default=Path("zig-out/esp/EFI/BOOT/BOOTX64.EFI"))
     parser.add_argument("--output", type=Path, default=Path("zig-out"))
@@ -265,6 +250,6 @@ def main():
     disk.write_bytes(disk_image(fat))
     print(disk.resolve())
 
-if __name__ == "__main__":
 
+if __name__ == "__main__":
     main()

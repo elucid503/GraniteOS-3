@@ -35,7 +35,7 @@ fn finish(status: u64) noreturn {
 
     _ = call(.exit, status, 0, 0);
 
-    while (true) asm volatile ("ud2");
+    while (true) asm volatile ("ud2"); // Fault if the exit syscall returns.
 
 }
 
@@ -83,7 +83,11 @@ pub export fn app_main(role: usize, peer: usize) callconv(.c) noreturn {
         },
         4 => {
 
-            asm volatile ("outb %%al, %%dx" : : [value] "{al}" (@as(u8, 0)), [port] "{dx}" (@as(u16, 0x80)), );
+            asm volatile ("outb %%al, %%dx" // Test that direct port access faults.
+                :
+                : [value] "{al}" (@as(u8, 0)),
+                  [port] "{dx}" (@as(u16, 0x80)),
+            );
             finish(96);
 
         },
@@ -123,6 +127,15 @@ pub export fn app_main(role: usize, peer: usize) callconv(.c) noreturn {
 
             @memset(page, 0xa5);
             check(call(.write, allocation.first + 4090, 16, 0).number != 0);
+
+            const adjacent = call(.allocate, 0, 0, 0);
+
+            check(adjacent.number == 0 and adjacent.first == allocation.first + 4096);
+            @memcpy(page[4090..], "cross ");
+            @memcpy(@as([*]u8, @ptrFromInt(adjacent.first))[0..5], "page\n");
+            check(call(.write, allocation.first + 4090, 11, 0).number == 0);
+            check(call(.write, adjacent.first + 4090, 16, 0).number != 0);
+            check(call(.release, adjacent.first, 0, 0).number == 0);
             check(call(.release, allocation.first, 0, 0).number == 0);
             check(call(.release, allocation.first, 0, 0).number != 0);
 

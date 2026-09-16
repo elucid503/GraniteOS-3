@@ -23,7 +23,9 @@ pub const Core = struct {
     id: u32,
     online: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
-    tables: tables.Tables = .{ },
+    tables: tables.Tables = .{
+
+    },
 
     stack: usize,
     emergency: [3]usize,
@@ -316,12 +318,15 @@ pub fn reboot() noreturn {
 
     cpu.out(0x64, 0xfe);
 
-    const empty = [_]u8{
+    const empty = std.mem.zeroes([10]u8);
+    asm volatile ("lidt (%[idtr]); int3" // Use an empty interrupt table to force a reset.
+        :
+        : [idtr] "r" (&empty),
+        : .{
 
-        0
+            .memory = true,
 
-    } ** 10;
-    asm volatile ("lidt (%[idtr]); int3" : : [idtr] "r" (&empty), : .{ .memory = true, });
+        });
     cpu.halt();
 
 }
@@ -330,7 +335,14 @@ pub fn testGuard() noreturn {
 
     const guard = local().stack - 9 * 4096;
 
-    asm volatile ("mov %[stack], %%rsp; pushq $0" : : [stack] "r" (guard + 4096), : .{ .memory = true, });
+    asm volatile ("mov %[stack], %%rsp; pushq $0" // Push onto the guard page to test double faults.
+        :
+        : [stack] "r" (guard + 4096),
+        : .{
+
+            .memory = true,
+
+        });
     cpu.halt();
 
 }

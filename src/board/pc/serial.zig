@@ -23,7 +23,7 @@ pub fn write(bytes: []const u8) void {
 
     for (bytes) |byte| {
 
-        if (byte == '\n') send('\r'); // nice to allow us to not have to manually add carriage returns to our strings
+        if (byte == '\n') send('\r');
         send(byte);
 
     }
@@ -44,7 +44,7 @@ fn send(byte: u8) void {
 
         }
 
-        asm volatile ("pause");
+        cpu.relax();
 
     }
 

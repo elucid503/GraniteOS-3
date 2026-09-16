@@ -23,19 +23,11 @@ pub const Tss = extern struct {
 
     reserved0: u32 = 0,
 
-    rsp: [3]u64 align(4) = [_]u64{
-
-        0
-
-    } ** 3,
+    rsp: [3]u64 align(4) = std.mem.zeroes([3]u64),
 
     reserved1: u64 align(4) = 0,
 
-    ist: [7]u64 align(4) = [_]u64{
-
-        0
-
-    } ** 7,
+    ist: [7]u64 align(4) = std.mem.zeroes([7]u64),
 
     reserved2: u64 align(4) = 0,
     reserved3: u16 = 0,
@@ -56,7 +48,9 @@ pub const Tables = struct {
         0,
 
     },
-    tss: Tss = .{ },
+    tss: Tss = .{
+
+    },
 
     pub fn load(self: *Tables, stack: usize, emergency: [3]usize) void {
 

@@ -1,21 +1,13 @@
 pub const MemoryKind = enum {
 
     reserved,
-
     available,
-
     loader,
-
     firmware,
-
     runtime,
-
     acpi,
-
     persistent,
-
     mmio,
-
     unusable,
 
 };

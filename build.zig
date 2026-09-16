@@ -2,7 +2,9 @@ const std = @import("std");
 
 pub fn build(b: *std.Build) void {
 
-    const optimize = b.standardOptimizeOption(.{ });
+    const optimize = b.standardOptimizeOption(.{
+
+    });
 
     const options = b.addOptions();
 
@@ -36,14 +38,14 @@ pub fn build(b: *std.Build) void {
 
     });
 
-    application.root_module.addAssemblyFile(b.path("src/user/entry.S"));
+    application.root_module.addAssemblyFile(b.path("src/user/asm/entry.S"));
     application.root_module.addAnonymousImport("abi", .{
 
         .root_source_file = b.path("src/kernel/abi.zig"),
 
     });
 
-    application.setLinkerScript(b.path("src/user/link.ld"));
+    application.setLinkerScript(b.path("src/user/asm/link.ld"));
     b.installArtifact(application);
 
     const target = b.resolveTargetQuery(.{
@@ -81,9 +83,9 @@ pub fn build(b: *std.Build) void {
     });
 
     boot.subsystem = .EfiApplication;
-    module.addAssemblyFile(b.path("src/arch/x86/entry.S"));
-    module.addAssemblyFile(b.path("src/arch/x86/interrupt.S"));
-    module.addAssemblyFile(b.path("src/arch/x86/startup.S"));
+    module.addAssemblyFile(b.path("src/arch/x86/asm/entry.S"));
+    module.addAssemblyFile(b.path("src/arch/x86/asm/interrupt.S"));
+    module.addAssemblyFile(b.path("src/arch/x86/asm/startup.S"));
 
     const install = b.addInstallArtifact(boot, .{
 

@@ -63,11 +63,8 @@ fn invoke(task: *process.Process, ticks: u64, frame: *abi.Request) CallError!voi
         .allocate => {
 
             const address = try task.vacant();
-            const physical = try root.frames.alloc();
-            errdefer root.frames.release(physical) catch @panic("Allocation ownership");
 
-            @memset(@as(*[4096]u8, @ptrFromInt(physical)), 0);
-            try task.space.map(address, physical, paging.user | paging.writable | paging.nx);
+            _ = try task.space.allocate(address, paging.user | paging.writable | paging.nx);
             task.mapped(address);
 
             frame.first = address;
@@ -123,11 +120,15 @@ fn copyFrom(task: *process.Process, address: u64, bytes: []u8) !void {
 
     if (address < paging.user_base or address >= paging.user_end or bytes.len > paging.user_end - address) return error.Invalid;
 
-    for (bytes, 0..) |*byte, index| {
+    var offset: usize = 0;
 
-        const physical = try task.space.translate(address + index, false);
+    while (offset < bytes.len) {
 
-        byte.* = @as(*const u8, @ptrFromInt(physical)).*;
+        const physical = try task.space.translate(address + offset, false);
+        const size = @min(bytes.len - offset, 4096 - (physical & 4095));
+
+        @memcpy(bytes[offset..][0..size], @as([*]const u8, @ptrFromInt(physical))[0..size]);
+        offset += size;
 
     }
 

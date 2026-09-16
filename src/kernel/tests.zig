@@ -112,36 +112,57 @@ test "physical allocator rejects overlap overflow and insufficient metadata" {
 
 }
 
+test "physical allocator scans packed states across cursor wrap" {
+
+    for (0..256) |pattern| {
+
+        for (0..12) |cursor| {
+
+            var bits = [_]u8{
+
+                0, @intCast(pattern), 0xaa,
+
+            };
+            var frames = memory.Frames{
+
+                .bits = &bits,
+                .count = 12,
+                .cursor = cursor,
+
+            };
+
+            for (0..4) |index| {
+
+                if ((pattern >> @intCast(index * 2)) & 3 == 1) frames.free_count += 1;
+
+            }
+
+            for (0..12) |offset| {
+
+                const index = (cursor + offset) % 12;
+
+                if (index < 4 or index >= 8 or (pattern >> @intCast((index - 4) * 2)) & 3 != 1) continue;
+
+                try std.testing.expectEqual(index * memory.page_size, try frames.alloc());
+
+            }
+
+            try std.testing.expectEqual(0, frames.free_count);
+            try std.testing.expectError(error.OutOfMemory, frames.alloc());
+
+        }
+
+    }
+
+}
+
 fn fixture() [512]u8 {
 
-    var bytes = [_]u8{
-
-        0
-
-    } ** 512;
+    var bytes = std.mem.zeroes([512]u8);
 
     const header = elf.Header{
 
-        .ident = .{
-
-            0x7f,
-            'E',
-            'L',
-            'F',
-            2,
-            1,
-            1,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-
-        },
+        .ident = "\x7fELF\x02\x01\x01".* ++ std.mem.zeroes([9]u8),
         .kind = 2,
         .machine = 62,
         .version = 1,
@@ -223,7 +244,9 @@ fn task(id: u64) process.Process {
     value.state = .ready;
     value.capabilities = null;
     value.home = 0;
-    value.context = .{ };
+    value.context = .{
+
+    };
 
     return value;
 
@@ -342,11 +365,7 @@ test "scheduler rotates ready processes without running blocked or foreign tasks
 
 test "MADT parser rejects nonadvancing truncated and corrupted records" {
 
-    var bytes = [_]u8{
-
-        0
-
-    } ** 52;
+    var bytes = std.mem.zeroes([52]u8);
     @memcpy(bytes[0..4], "APIC");
     std.mem.writeInt(u32, bytes[4..8], bytes.len, .little);
     bytes[45] = 8;

@@ -10,7 +10,9 @@ const machine = arch.machine;
 
 pub export fn dispatch(frame: *const arch.context.Frame, floating: *const [512]u8) callconv(.c) *const arch.context.Context {
 
-    const active_root = asm volatile ("mov %%cr3, %[value]" : [value] "=r" (-> usize), );
+    const active_root = asm volatile ("mov %%cr3, %[value]" // Read the active page-table address.
+        : [value] "=r" (-> usize),
+    );
 
     if (root.failed.load(.acquire)) arch.cpu.halt();
 
@@ -98,7 +100,9 @@ fn dump(frame: *const arch.context.Frame, active_root: usize) void {
 
     root.log.hex("rip", frame.rip);
     root.log.hex("rsp", frame.rsp);
-    root.log.hex("cr2", asm volatile ("mov %%cr2, %[value]" : [value] "=r" (-> usize), ));
+    root.log.hex("cr2", asm volatile ("mov %%cr2, %[value]" // Read the faulting memory address.
+        : [value] "=r" (-> usize),
+    ));
 
     root.log.hex("rax", frame.rax);
     root.log.hex("rbx", frame.rbx);

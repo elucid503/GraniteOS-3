@@ -29,11 +29,7 @@ fn descriptor(kind: uefi.tables.MemoryType) Descriptor {
 
 test "memory map honors descriptor stride and protects firmware allocations" {
 
-    var bytes = [_]u8{
-
-        0,
-
-    } ** 96;
+    var bytes = std.mem.zeroes([96]u8);
 
     const first = descriptor(.conventional_memory);
     var second = descriptor(.loader_data);

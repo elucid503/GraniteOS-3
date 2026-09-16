@@ -1,3 +1,5 @@
+const std = @import("std");
+
 const abi = @import("../../kernel/abi.zig");
 
 pub const Frame = extern struct {
@@ -31,13 +33,11 @@ pub const Frame = extern struct {
 
 pub const Context = extern struct {
 
-    frame: Frame = .{ },
+    frame: Frame = .{
 
-    floating: [512]u8 align(16) = [_]u8{
+    },
 
-        0
-
-    } ** 512,
+    floating: [512]u8 align(16) = std.mem.zeroes([512]u8),
 
     pub fn request(self: *const Context) abi.Request {
 

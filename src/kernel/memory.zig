@@ -80,11 +80,17 @@ pub const Frames = struct {
 
         if (self.free_count == 0) return error.OutOfMemory;
 
-        for (0..self.count) |_| {
+        var scanned: usize = 0;
+
+        while (scanned < self.count) {
 
             const index = self.cursor;
+            const byte = self.bits[index / 4];
+            // Only the two-bit state 01 denotes a free frame.
+            const step = if (byte & ~(byte >> 1) & 0x55 == 0) 4 - index % 4 else @as(usize, 1);
 
-            self.cursor = (index + 1) % self.count;
+            self.cursor = (index + step) % self.count;
+            scanned += step;
             if (self.state(index) != 1) continue;
 
             self.set(index, 2);
@@ -104,15 +110,8 @@ pub const Frames = struct {
 
         const index = address / page_size;
 
-        switch (self.state(index)) {
-
-            1 => return error.DoubleFree,
-            2 => {
-
-            },
-            else => return error.InvalidFrame,
-
-        }
+        if (self.state(index) == 1) return error.DoubleFree;
+        if (self.state(index) != 2) return error.InvalidFrame;
 
         self.set(index, 1);
         self.free_count += 1;

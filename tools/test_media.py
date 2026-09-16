@@ -5,11 +5,10 @@ import zlib
 
 import media
 
-class MediaTest(unittest.TestCase):
 
+class MediaTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-
         cls.efi = bytearray(1703)
         cls.efi[:2] = b"MZ"
         struct.pack_into("<I", cls.efi, 60, 128)
@@ -20,7 +19,6 @@ class MediaTest(unittest.TestCase):
         cls.fat = media.fat_image(cls.efi)
 
     def test_fat_directory_and_file_chain(self):
-
         image = self.fat
         sector, = struct.unpack_from("<H", image, 11)
         reserved, = struct.unpack_from("<H", image, 14)
@@ -36,7 +34,6 @@ class MediaTest(unittest.TestCase):
 
         cluster = 2
         for component in (b"EFI        ", b"BOOT       ", b"BOOTX64 EFI"):
-
             offset = (start + cluster - 2) * sector
             entries = [image[pos:pos + 32] for pos in range(offset, offset + sector, 32)]
             entry = next(entry for entry in entries if entry[:11] == component)
@@ -48,7 +45,6 @@ class MediaTest(unittest.TestCase):
         contents = bytearray()
         seen = set()
         while cluster < 0x0FFFFFF8:
-
             self.assertNotIn(cluster, seen)
             seen.add(cluster)
             offset = (start + cluster - 2) * sector
@@ -58,7 +54,6 @@ class MediaTest(unittest.TestCase):
         self.assertEqual(contents[:size], self.efi)
 
     def test_iso_catalog_and_embedded_volume(self):
-
         iso = media.iso_image(self.fat)
         self.assertEqual(iso[16 * 2048:16 * 2048 + 7], b"\x01CD001\x01")
         total, = struct.unpack_from("<I", iso, 16 * 2048 + 80)
@@ -72,12 +67,10 @@ class MediaTest(unittest.TestCase):
         self.assertEqual(iso[image_block * 2048:], self.fat)
 
     def test_gpt_primary_backup_checksums_and_esp(self):
-
         disk = media.disk_image(self.fat)
         self.assertEqual(disk[450], 0xEE)
         total = len(disk) // 512
         for lba in (1, total - 1):
-
             header = bytearray(disk[lba * 512:lba * 512 + 92])
             self.assertEqual(header[:8], b"EFI PART")
             checksum, = struct.unpack_from("<I", header, 16)
@@ -100,18 +93,14 @@ class MediaTest(unittest.TestCase):
             self.assertEqual(disk[first * 512 + 4096:(last + 1) * 512], self.fat[4096:])
 
     def test_rejects_non_efi_inputs(self):
-
         with self.assertRaises(ValueError):
-
             media.fat_image(b"not an executable")
 
         invalid = bytearray(self.efi)
         struct.pack_into("<H", invalid, 220, 3)
         with self.assertRaises(ValueError):
-
             media.fat_image(invalid)
 
+
 if __name__ == "__main__":
-
     unittest.main()
-
