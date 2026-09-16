@@ -7,6 +7,8 @@ const process = @import("process.zig");
 const ipc = @import("ipc.zig");
 const schedule = @import("schedule.zig");
 const acpi = @import("../board/pc/acpi.zig");
+const permission = @import("permission.zig");
+const abi = @import("abi.zig");
 
 test "physical allocator protects firmware state and detects invalid frees" {
 
@@ -123,6 +125,7 @@ test "physical allocator scans packed states across cursor wrap" {
                 0, @intCast(pattern), 0xaa,
 
             };
+
             var frames = memory.Frames{
 
                 .bits = &bits,
@@ -244,11 +247,162 @@ fn task(id: u64) process.Process {
     value.state = .ready;
     value.capabilities = null;
     value.home = 0;
+    value.ticket = 0;
+    value.deadline = 0;
+    value.policy = .{
+
+        .layer = .service,
+        .length = abi.permission_count,
+        .permissions = .{
+
+            .ipc, .memory, .time, .ports, .mmio, .reboot, .diagnostics, .management
+
+        },
+
+    };
+
     value.context = .{
 
     };
 
     return value;
+
+}
+
+test "permission arrays distinguish services and deny undeclared authority" {
+
+    try std.testing.expectError(error.Denied, permission.Policy.init(.application, &.{
+
+        .ports
+
+    }));
+    try std.testing.expectError(error.Denied, permission.Policy.init(.application, &.{
+
+        .management
+
+    }));
+    try std.testing.expectError(error.Denied, permission.Policy.init(.application, &.{
+
+        .mmio
+
+    }));
+    try std.testing.expectError(error.Denied, permission.Policy.init(.application, &.{
+
+        .reboot
+
+    }));
+    try std.testing.expectError(error.Invalid, permission.Policy.init(.service, &.{
+
+        .ipc, .ipc
+
+    }));
+
+    var owner = task(1);
+    var grant = process.Capability{
+
+        .right = .port, .base = 0x2f8, .size = 8
+
+    };
+
+    owner.capabilities = &grant;
+    owner.policy = try permission.Policy.init(.service, &.{
+
+        .ipc
+
+    });
+    try std.testing.expect(!owner.permits(.port, 0x2f8, 1));
+    try std.testing.expect(!owner.policy.permits(.memory));
+    try std.testing.expect(!owner.policy.permits(.time));
+    owner.policy = try permission.Policy.init(.service, &.{
+
+        .ipc, .ports
+
+    });
+    try std.testing.expect(owner.permits(.port, 0x2f8, 1));
+    try std.testing.expect(!owner.permits(.port, 0x3f8, 1));
+    try std.testing.expect(!owner.permits(.port, 0x2ff, 2));
+    try std.testing.expectEqualSlices(abi.Permission, &.{
+
+        .ipc, .ports
+
+    }, owner.policy.permissions[0..owner.policy.length]);
+
+}
+
+test "RPC authenticates one-shot replies and cancels both phases on peer death" {
+
+    var client = task(1);
+    var server = task(2);
+    var stranger = task(3);
+    var grant = process.Capability{
+
+        .right = .send,
+        .base = 2,
+        .size = 1,
+
+    };
+
+    client.next = &server;
+    server.next = &stranger;
+    client.capabilities = &grant;
+
+    try ipc.call(&client, &client, 2, 41, 100);
+    try std.testing.expectEqual(.sending, client.state);
+    try std.testing.expect(ipc.poll(&client, &server));
+    const ticket = server.context.request().third;
+
+    try std.testing.expectEqual(.replying, client.state);
+    try std.testing.expectError(error.InvalidReply, ipc.reply(&client, &stranger, 1, ticket, 42));
+    try std.testing.expectError(error.InvalidReply, ipc.reply(&client, &server, 1, ticket + 1, 42));
+    try ipc.reply(&client, &server, 1, ticket, 42);
+    try std.testing.expectEqual(42, client.context.request().first);
+    try std.testing.expectError(error.InvalidReply, ipc.reply(&client, &server, 1, ticket, 42));
+
+    ipc.receive(&client, &server);
+    try ipc.call(&client, &client, 2, 43, 100);
+    try std.testing.expectEqual(.replying, client.state);
+    try std.testing.expectError(error.InvalidReply, ipc.reply(&client, &server, 1, ticket, 42));
+    ipc.cancel(&client, 2);
+    try std.testing.expectEqual(.ready, client.state);
+    try std.testing.expectEqual(3, client.context.request().number);
+
+    try ipc.call(&client, &client, 2, 44, 100);
+    ipc.cancel(&client, 2);
+    try std.testing.expectEqual(.ready, client.state);
+    try std.testing.expectEqual(3, client.context.request().number);
+
+}
+
+test "RPC deadlines release queued and delivered calls without reviving stale replies" {
+
+    var client = task(1);
+    var server = task(2);
+    var grant = process.Capability{
+
+        .right = .send,
+        .base = 1,
+        .size = 2,
+
+    };
+
+    client.next = &server;
+    client.capabilities = &grant;
+    server.capabilities = &grant;
+    try ipc.call(&client, &client, 2, 1, 10);
+    ipc.expire(&client, 9);
+    try std.testing.expectEqual(.sending, client.state);
+    ipc.expire(&client, 10);
+    try std.testing.expectEqual(6, client.context.request().number);
+    try std.testing.expect(!ipc.poll(&client, &server));
+
+    ipc.receive(&client, &server);
+    try ipc.call(&client, &client, 2, 1, 20);
+    const ticket = server.context.request().third;
+
+    try std.testing.expectError(error.Deadlock, ipc.call(&client, &server, 1, 2, 20));
+    ipc.expire(&client, 20);
+    try std.testing.expectEqual(6, client.context.request().number);
+    try std.testing.expectError(error.InvalidReply, ipc.reply(&client, &server, 1, ticket, 0));
 
 }
 

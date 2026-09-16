@@ -18,16 +18,14 @@
 - [x] Application loading and execution.
 - [x] Kernel failure diagnostics and reboot.
 
-Implementation, interfaces, validation, and current limits: [KERNEL.md](KERNEL.md).
-
 ## Milestone 3: Services
 
-- [ ] Isolated drivers and system helpers.
-- [ ] Restricted service access to hardware and memory.
-- [ ] Service startup, supervision, and restart.
-- [ ] Recovery without interrupting unrelated applications.
-- [ ] Application-to-service and application-to-application APIs.
-- [ ] Terminal and shell.
+- [x] Isolated drivers and system helpers.
+- [x] Restricted service access to hardware and memory.
+- [x] Service startup, supervision, and restart.
+- [x] Recovery without interrupting unrelated applications.
+- [x] Application-to-service and application-to-application APIs.
+- [x] Terminal and shell.
 
 ## Milestone 4: Storage and Accounts
 

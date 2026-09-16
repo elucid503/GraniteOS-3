@@ -1,11 +1,14 @@
+const std = @import("std");
+
 const arch = @import("../arch/root.zig");
 const root = @import("root.zig");
 const process = @import("process.zig");
 const ipc = @import("ipc.zig");
 const abi = @import("abi.zig");
+const service = @import("service.zig");
 
 const paging = arch.paging;
-const CallError = paging.MapError || ipc.IpcError || error{ Denied, Invalid };
+const CallError = paging.MapError || ipc.IpcError || @import("elf.zig").LoadError || error{ Denied, Invalid, Busy, ProcessIdsExhausted, InvalidProcessor };
 
 pub fn handle(task: *process.Process, ticks: u64) void {
 
@@ -18,7 +21,8 @@ pub fn handle(task: *process.Process, ticks: u64) void {
             error.Denied, error.PermissionDenied => 1,
             error.NoProcess => 3,
             error.Deadlock => 4,
-            error.OutOfMemory => 5,
+            error.OutOfMemory, error.Exhausted, error.ProcessIdsExhausted => 5,
+            error.Busy => 7,
             else => 2,
 
         };
@@ -44,7 +48,13 @@ fn invoke(task: *process.Process, ticks: u64, frame: *abi.Request) CallError!voi
         .send => try ipc.send(root.processes, task, frame.first, frame.second),
         .receive => {
 
-            ipc.receive(root.processes, task);
+            if (!task.policy.permits(.ipc)) return error.Denied;
+            if (frame.first > 1) return error.Invalid;
+            if (frame.first == 1) {
+
+                if (!ipc.poll(root.processes, task)) return error.NoProcess;
+
+            } else ipc.receive(root.processes, task);
             frame.* = task.context.request();
             frame.number = 0;
 
@@ -62,6 +72,7 @@ fn invoke(task: *process.Process, ticks: u64, frame: *abi.Request) CallError!voi
         },
         .allocate => {
 
+            if (!task.policy.permits(.memory)) return error.Denied;
             const address = try task.vacant();
 
             _ = try task.space.allocate(address, paging.user | paging.writable | paging.nx);
@@ -72,6 +83,7 @@ fn invoke(task: *process.Process, ticks: u64, frame: *abi.Request) CallError!voi
         },
         .release => {
 
+            if (!task.policy.permits(.memory)) return error.Denied;
             if (frame.first < paging.user_base + 0x10000000 or frame.first >= task.allocation or frame.first % 4096 != 0) return error.Invalid;
 
             try task.space.unmap(frame.first);
@@ -108,8 +120,75 @@ fn invoke(task: *process.Process, ticks: u64, frame: *abi.Request) CallError!voi
             arch.machine.reboot();
 
         },
-        .ticks => frame.first = ticks,
+        .ticks => {
+
+            if (!task.policy.permits(.time)) return error.Denied;
+            frame.first = ticks;
+
+        },
         .identity => frame.first = task.id,
+        .owner => frame.first = task.owner,
+        .call => {
+
+            if (frame.third == 0 or frame.third > 6000 or ticks > ~@as(u64, 0) - frame.third) return error.Invalid;
+            const destination = if (frame.first == 0) try service.endpoint(task.owner) else frame.first;
+            try ipc.call(root.processes, task, destination, frame.second, ticks + frame.third);
+
+        },
+        .reply => {
+
+            if (!task.policy.permits(.ipc)) return error.Denied;
+            try ipc.reply(root.processes, task, frame.first, frame.second, frame.third);
+
+        },
+        .sleep => {
+
+            if (!task.policy.permits(.time)) return error.Denied;
+            if (frame.first == 0 or frame.first > 6000 or ticks > ~@as(u64, 0) - frame.first) return error.Invalid;
+            task.deadline = ticks + frame.first;
+            task.state = .sleeping;
+
+        },
+        .spawn => {
+
+            if (!task.permits(.manage, 0, 1)) return error.Denied;
+            const image = std.enums.fromInt(abi.Image, frame.first) orelse return error.Invalid;
+            frame.first = try service.spawn(task, image, frame.second);
+
+        },
+        .inspect => {
+
+            if (!task.permits(.manage, 0, 1)) return error.Denied;
+            if (frame.first == 0) {
+
+                const image = std.enums.fromInt(abi.Image, frame.second) orelse return error.Invalid;
+                const child = service.inspect(task, image) orelse return error.NoProcess;
+                frame.first = child.id;
+                frame.second = child.generation;
+                return;
+
+            }
+
+            const child = ipc.find(root.processes, frame.first) orelse return error.NoProcess;
+            if (child.owner != task.id) return error.Denied;
+            frame.first = child.id;
+
+        },
+        .connect => {
+
+            if (!task.permits(.manage, 0, 1)) return error.Denied;
+            try service.connect(task, frame.first, frame.second);
+
+        },
+        .stop => {
+
+            if (!task.permits(.manage, 0, 1)) return error.Denied;
+            const child = ipc.find(root.processes, frame.first) orelse return error.NoProcess;
+            if (child.owner != task.id) return error.Denied;
+            if (child.state == .running) return error.Busy;
+            child.state = .dead;
+
+        },
         else => return error.Invalid,
 
     }

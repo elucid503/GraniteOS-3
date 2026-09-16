@@ -40,7 +40,7 @@ pub fn start(info: *const boot.Info) !void {
 
     }
 
-    for (3..9) |role| {
+    for (3..10) |role| {
 
         const task = try spawn(role, bsp);
 
@@ -129,6 +129,24 @@ fn spawn(role: usize, home: u32) !*process.Process {
 
     const task = try root.spawn(@embedFile("application"), role, home);
 
+    if (role == 6) {
+
+        try task.configure(.service, &.{
+
+            .ipc, .memory, .time, .diagnostics, .ports, .mmio
+
+        });
+
+    } else {
+
+        try task.configure(.application, &.{
+
+            .ipc, .memory, .time, .diagnostics
+
+        });
+
+    }
+
     try task.grant(.log, 0, 1);
 
     const record: *Record = @ptrFromInt(try root.frames.alloc());
@@ -193,6 +211,7 @@ pub fn faulted(task: *process.Process, frame: *const arch.context.Frame) void {
         5 => frame.vector == 14 and frame.code & 21 == 21,
         7 => frame.vector == 14 and frame.code & 7 == 7,
         8 => frame.vector == 14 and frame.code & 5 == 4,
+        9 => frame.vector == 14 and frame.code & 7 == 7,
         else => false,
 
     };
@@ -205,7 +224,7 @@ pub fn faulted(task: *process.Process, frame: *const arch.context.Frame) void {
 pub fn verify() void {
 
     if (finished or records != null or root.processes != null) return;
-    if (!passed or faults != 5 or successes != 3 + 2 * arch.machine.core_count or root.frames.free_count != initial_free) @panic("Kernel self-test failed");
+    if (!passed or faults != 6 or successes != 3 + 2 * arch.machine.core_count or root.frames.free_count != initial_free) @panic("Kernel self-test failed");
 
     var current = arch.machine.cores;
 
@@ -222,5 +241,6 @@ pub fn verify() void {
     root.log.line("process memory reclaimed");
     root.ready();
     finished = true;
+    @import("service.zig").start() catch |err| root.failure(@errorName(err));
 
 }

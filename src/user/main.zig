@@ -45,7 +45,7 @@ fn fatal(_: []const u8, _: ?usize) noreturn {
 
 }
 
-pub export fn app_main(role: usize, peer: usize) callconv(.c) noreturn {
+pub export fn app_main(role: usize, peer: usize, environment: *const abi.Environment) callconv(.c) noreturn {
 
     switch (role) {
 
@@ -167,6 +167,13 @@ pub export fn app_main(role: usize, peer: usize) callconv(.c) noreturn {
 
             _ = @as(*volatile u8, @ptrFromInt(0xffffffb000 - 4096)).*;
             finish(92);
+
+        },
+        9 => {
+
+            const length: *volatile u64 = @constCast(&environment.length);
+            length.* = 0;
+            finish(91);
 
         },
         else => finish(94),

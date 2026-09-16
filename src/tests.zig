@@ -7,6 +7,7 @@ const graphics = @import("boot/uefi/graphics.zig");
 comptime {
 
     _ = @import("kernel/tests.zig");
+    _ = @import("services/tests.zig");
 
 }
 

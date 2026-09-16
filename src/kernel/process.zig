@@ -1,6 +1,8 @@
 const arch = @import("../arch/root.zig");
 const elf = @import("elf.zig");
 const memory = @import("memory.zig");
+const abi = @import("abi.zig");
+const permission = @import("permission.zig");
 
 const paging = arch.paging;
 pub const State = enum {
@@ -9,6 +11,8 @@ pub const State = enum {
     running,
     sending,
     receiving,
+    replying,
+    sleeping,
     dead,
 
 };
@@ -20,6 +24,7 @@ pub const Right = enum {
     mmio,
     reboot,
     log,
+    manage,
 
 };
 
@@ -38,6 +43,8 @@ pub const Process = struct {
     next: ?*Process = null,
     id: u64,
     state: State = .ready,
+    policy: permission.Policy = permission.application,
+    environment: *abi.Environment,
 
     space: paging.Space,
     context: arch.context.Context,
@@ -46,6 +53,11 @@ pub const Process = struct {
     destination: u64 = 0,
     sequence: u64 = 0,
     message: u64 = 0,
+    ticket: u64 = 0,
+    deadline: u64 = 0,
+    owner: u64 = 0,
+    image: ?abi.Image = null,
+    generation: u64 = 0,
 
     home: u32,
     preemptions: usize = 0,
@@ -56,6 +68,7 @@ pub const Process = struct {
     pub fn create(kernel: paging.Space, bytes: []const u8, id: u64, argument: usize, home: u32) !*Process {
 
         const stack_top = paging.user_end - 4096;
+        const environment_address = paging.user_end - 0x10000;
         const image = try elf.Image.parse(bytes, paging.user_base, paging.user_base + 0x10000000);
 
         const address = try kernel.frames.alloc();
@@ -101,8 +114,12 @@ pub const Process = struct {
             .space = space,
             .context = arch.context.Context.init(image.header.entry, stack_top, argument, false),
             .home = home,
+            .environment = @ptrFromInt(try space.allocate(environment_address, paging.user | paging.nx)),
 
         };
+
+        self.context.frame.rdx = environment_address;
+        self.publish();
 
         return self;
 
@@ -110,6 +127,7 @@ pub const Process = struct {
 
     pub fn grant(self: *Process, right: Right, base: u64, size: u64) !void {
 
+        if (!self.policy.permits(required(right))) return error.Denied;
         const capability: *Capability = @ptrFromInt(try self.space.frames.alloc());
 
         capability.* = .{
@@ -148,6 +166,7 @@ pub const Process = struct {
 
     pub fn permits(self: *const Process, right: Right, base: u64, size: u64) bool {
 
+        if (!self.policy.permits(required(right))) return false;
         var current = self.capabilities;
 
         while (current) |capability| : (current = capability.next) {
@@ -157,6 +176,25 @@ pub const Process = struct {
         }
 
         return false;
+
+    }
+
+    pub fn configure(self: *Process, layer: abi.Layer, permissions: []const abi.Permission) permission.PolicyError!void {
+
+        self.policy = try permission.Policy.init(layer, permissions);
+        self.publish();
+
+    }
+
+    fn publish(self: *Process) void {
+
+        self.environment.* = .{
+
+            .layer = self.policy.layer,
+            .length = self.policy.length,
+            .permissions = self.policy.permissions,
+
+        };
 
     }
 
@@ -180,6 +218,21 @@ pub const Process = struct {
     }
 
 };
+
+fn required(right: Right) abi.Permission {
+
+    return switch (right) {
+
+        .send => .ipc,
+        .port => .ports,
+        .mmio => .mmio,
+        .reboot => .reboot,
+        .log => .diagnostics,
+        .manage => .management,
+
+    };
+
+}
 
 comptime {
 

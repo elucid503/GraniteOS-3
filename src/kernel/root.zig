@@ -6,6 +6,7 @@ const memory = @import("memory.zig");
 const process = @import("process.zig");
 const ipc = @import("ipc.zig");
 const check = @import("check.zig");
+const service = @import("service.zig");
 const Log = @import("../debug/log.zig").Log;
 
 const options = @import("options");
@@ -20,6 +21,8 @@ pub var failed = std.atomic.Value(bool).init(false);
 var initialized = false;
 var next_id: u64 = 1;
 var framebuffer: ?boot.Framebuffer = null;
+pub var primary: u32 = 0;
+pub var ticks: u64 = 0;
 
 pub fn start(info: *const boot.Info, output: Log) !noreturn {
 
@@ -50,6 +53,7 @@ pub fn start(info: *const boot.Info, output: Log) !noreturn {
 
     try machine.prepare(info, &frames, log);
     initialized = true;
+    primary = machine.local().id;
     log.line("memory protected");
 
     if (options.self_test) try check.start(info);
@@ -58,7 +62,12 @@ pub fn start(info: *const boot.Info, output: Log) !noreturn {
 
     if (options.panic_test) @panic("Requested kernel failure test");
     if (options.guard_test) arch.machine.testGuard();
-    if (!options.self_test) ready();
+    if (!options.self_test) {
+
+        try service.start();
+        ready();
+
+    }
 
     launched.store(true, .release);
     machine.apic.timer();
@@ -146,6 +155,8 @@ pub fn reap() void {
         }
 
         ipc.cancel(processes, task.id);
+        service.revoke(task.id);
+        service.departed(task.id);
         link.* = task.next;
         task.destroy();
 
