@@ -1,48 +1,186 @@
+const std = @import("std");
+
 const boot = @import("../boot/info.zig");
+const arch = @import("../arch/root.zig");
+const memory = @import("memory.zig");
+const process = @import("process.zig");
+const ipc = @import("ipc.zig");
+const check = @import("check.zig");
 const Log = @import("../debug/log.zig").Log;
 
-pub fn start(info: *const boot.Info, log: Log) void {
+const options = @import("options");
 
-    if (info.version != 1 or info.memory.len == 0) @panic("Invalid boot information");
+const machine = arch.machine;
+pub var frames: memory.Frames = undefined;
+pub var processes: ?*process.Process = null;
+pub var log: Log = undefined;
+pub var lock = std.atomic.Value(bool).init(false);
+var launched = std.atomic.Value(bool).init(false);
+pub var failed = std.atomic.Value(bool).init(false);
+var initialized = false;
+var next_id: u64 = 1;
+var framebuffer: ?boot.Framebuffer = null;
+
+pub fn start(info: *const boot.Info, output: Log) !noreturn {
+
+    log = output;
+    framebuffer = info.framebuffer;
+    if (info.version != 2 or info.memory.len == 0) return error.InvalidBootInfo;
 
     log.line("start");
-    log.decimal("regions", info.memory.len);
-    log.hex("image", info.image.base);
-    log.hex("stack", info.stack.base);
+    log.hex("image base", info.image.base);
 
-    if (info.acpi_rsdp) |address| {
+    const size = try memory.Frames.storageSize(info.memory);
+    var storage: ?[]u8 = null;
 
-        log.hex("acpi", address);
+    for (info.memory) |region| {
 
-    } else {
+        if (region.kind != .available or region.base < 0x100000 or region.size < std.mem.alignForward(usize, size, 4096)) continue;
 
-        log.line("acpi unavailable");
+        storage = @as([*]u8, @ptrFromInt(region.base))[0..size];
+
+        break;
 
     }
 
-    if (info.framebuffer) |framebuffer| {
+    const bits = storage orelse return error.OutOfMemory;
 
-        const pixels: [*]volatile u32 = @ptrFromInt(framebuffer.base);
-        const rows = @min(framebuffer.height, 24);
+    frames = try memory.Frames.init(info.memory, bits, @intFromPtr(bits.ptr), std.mem.alignForward(usize, size, 4096));
+    log.decimal("free pages", frames.free_count);
 
-        for (0..rows) |y| {
+    try machine.prepare(info, &frames, log);
+    initialized = true;
+    log.line("memory protected");
 
-            for (0..framebuffer.width) |x| {
+    if (options.self_test) try check.start(info);
+    try machine.startOthers(info, secondary);
+    log.line("all processors online");
 
-                pixels[y * framebuffer.stride + x] = framebuffer.green_mask;
+    if (options.panic_test) @panic("Requested kernel failure test");
+    if (options.guard_test) arch.machine.testGuard();
+    if (!options.self_test) ready();
 
-            }
+    launched.store(true, .release);
+    machine.apic.timer();
+    arch.context.restore(&machine.local().idle);
+
+}
+
+pub fn spawn(bytes: []const u8, argument: usize, home: u32) !*process.Process {
+
+    if (next_id == std.math.maxInt(u64)) return error.ProcessIdsExhausted;
+
+    var cores = machine.cores;
+
+    while (cores) |core| : (cores = core.next) {
+
+        if (core.id == home) break;
+
+    } else return error.InvalidProcessor;
+
+    const task = try process.Process.create(machine.kernel, bytes, next_id, argument, home);
+
+    next_id += 1;
+    task.next = processes;
+    processes = task;
+
+    return task;
+
+}
+
+pub fn ready() void {
+
+    if (framebuffer) |display| {
+
+        const pixels: [*]volatile u32 = @ptrFromInt(display.base);
+
+        for (0..@min(display.height, 24)) |y| {
+
+            for (0..display.width) |x| pixels[y * display.stride + x] = display.green_mask;
 
         }
-
-        log.line("framebuffer ready");
-
-    } else {
-
-        log.line("framebuffer unavailable");
 
     }
 
     log.line("ready");
+
+}
+
+fn secondary(core: *machine.Core) callconv(.c) noreturn {
+
+    arch.cpu.features();
+    arch.paging.activate(machine.kernel.root);
+    core.tables.load(core.stack, core.emergency);
+    machine.apic.init();
+    core.online.store(true, .release);
+
+    while (!launched.load(.acquire)) arch.cpu.relax();
+
+    machine.apic.timer();
+    arch.context.restore(&core.idle);
+
+}
+
+pub fn exited(task: *process.Process, status: u64) void {
+
+    if (options.self_test) check.exited(task, status);
+    log.decimal("exited process", task.id);
+    log.decimal("exit status", status);
+
+    task.state = .dead;
+
+}
+
+pub fn reap() void {
+
+    var link = &processes;
+
+    while (link.*) |task| {
+
+        if (task.state != .dead) {
+
+            link = &task.next;
+
+            continue;
+
+        }
+
+        ipc.cancel(processes, task.id);
+        link.* = task.next;
+        task.destroy();
+
+    }
+
+}
+
+pub fn failure(message: []const u8) noreturn {
+
+    failureAt(message, @returnAddress());
+
+}
+
+pub fn failureAt(message: []const u8, address: ?usize) noreturn {
+
+    beginFailure();
+    reportFailure(message, address);
+
+}
+
+pub fn beginFailure() void {
+
+    arch.cpu.disable();
+    if (failed.swap(true, .acq_rel)) arch.cpu.halt();
+    if (initialized) machine.apic.stopOthers();
+
+}
+
+pub fn reportFailure(message: []const u8, address: ?usize) noreturn {
+
+    log.err(message);
+    if (address) |value| log.hex("failure address", value);
+    log.line("rebooting after kernel failure");
+
+    if (initialized) machine.apic.delay(1000);
+    machine.reboot();
 
 }

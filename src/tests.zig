@@ -4,6 +4,12 @@ const boot = @import("boot/info.zig");
 const map = @import("boot/uefi/map.zig");
 const graphics = @import("boot/uefi/graphics.zig");
 
+comptime {
+
+    _ = @import("kernel/tests.zig");
+
+}
+
 const uefi = std.os.uefi;
 const Descriptor = uefi.tables.MemoryDescriptor;
 
@@ -31,6 +37,7 @@ test "memory map honors descriptor stride and protects firmware allocations" {
 
     const first = descriptor(.conventional_memory);
     var second = descriptor(.loader_data);
+
     second.physical_start = 0x100000;
 
     @memcpy(bytes[0..40], std.mem.asBytes(&first));
@@ -105,6 +112,7 @@ const Firmware = struct {
         key.* = @enumFromInt(reads);
 
         const entry = descriptor(.conventional_memory);
+
         @memcpy(buffer.?[0..40], std.mem.asBytes(&entry));
 
         return .success;
@@ -115,6 +123,7 @@ const Firmware = struct {
 
         exits += 1;
         if (@intFromEnum(key) != reads) return .device_error;
+
         return if (exits == 1 or always_fail) failure else .success;
 
     }

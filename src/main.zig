@@ -14,6 +14,7 @@ var log = Log{
     .scope = "boot",
 
 };
+
 pub const panic = std.debug.FullPanic(fatal);
 
 pub fn main() noreturn {
@@ -46,13 +47,13 @@ fn entry(pointer: *const anyopaque) callconv(.c) noreturn {
     log.line("handoff ready");
     log.scope = "kernel";
 
-    kernel.start(info, log);
-    cpu.halt();
+    kernel.start(info, log) catch |err| kernel.failure(@errorName(err));
 
 }
 
-fn fatal(message: []const u8, _: ?usize) noreturn {
+fn fatal(message: []const u8, address: ?usize) noreturn {
 
+    if (std.mem.eql(u8, log.scope, "kernel")) kernel.failureAt(message, address);
     log.err(message);
     cpu.halt();
 

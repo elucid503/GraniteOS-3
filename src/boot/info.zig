@@ -1,13 +1,21 @@
 pub const MemoryKind = enum {
 
     reserved,
+
     available,
+
     loader,
+
     firmware,
+
     runtime,
+
     acpi,
+
     persistent,
+
     mmio,
+
     unusable,
 
 };
@@ -35,11 +43,12 @@ pub const Framebuffer = struct {
 
 pub const Info = struct {
 
-    version: u32 = 1,
+    version: u32 = 2,
     memory: []const Region,
     image: Region,
     stack: Region,
     framebuffer: ?Framebuffer,
     acpi_rsdp: ?u64,
+    trampoline: u64 = 0,
 
 };

@@ -7,3 +7,10 @@ sh tools/build.sh --optimize ReleaseSafe
 sh tools/vmware.sh --action test --media iso
 sh tools/vmware.sh --action test --media disk
 ```
+
+On Windows, the VMware runner can also be invoked directly:
+
+```sh
+python tools/vmware.py --media iso --cpus 2
+python tools/vmware.py --media disk --cpus 4 --memory 512
+```

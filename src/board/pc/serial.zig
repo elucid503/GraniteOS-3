@@ -23,7 +23,7 @@ pub fn write(bytes: []const u8) void {
 
     for (bytes) |byte| {
 
-        if (byte == '\n') send('\r');
+        if (byte == '\n') send('\r'); // nice to allow us to not have to manually add carriage returns to our strings
         send(byte);
 
     }
@@ -39,6 +39,7 @@ fn send(byte: u8) void {
         if (cpu.in(port + 5) & 0x20 != 0) {
 
             cpu.out(port, byte);
+
             return;
 
         }

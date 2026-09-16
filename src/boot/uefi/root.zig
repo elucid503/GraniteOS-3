@@ -6,7 +6,7 @@ const graphics = @import("graphics.zig");
 const Log = @import("../../debug/log.zig").Log;
 
 const uefi = std.os.uefi;
-const LoaderError = error{MissingBootServices, MissingLoadedImage, MemoryMapUnstable};
+const LoaderError = error{ MissingBootServices, MissingLoadedImage, MemoryMapUnstable };
 var exit_attempted = false;
 
 pub fn prepare(log: Log) !*const boot.Info {
@@ -21,12 +21,16 @@ pub fn prepare(log: Log) !*const boot.Info {
     const info_bytes = try services.allocatePool(.loader_data, @sizeOf(boot.Info));
     const info: *boot.Info = @ptrCast(@alignCast(info_bytes.ptr));
     const stack = try services.allocatePages(.any, .loader_data, 16);
+    const trampoline = try services.allocatePages(.{
+
+        .max_address = @ptrFromInt(0xff000),
+
+    }, .loader_data, 1);
 
     info.* = .{
 
-        .memory = &.{
+        .memory = &.{ },
 
-        },
         .image = .{
 
             .base = @intFromPtr(loaded.image_base),
@@ -43,6 +47,7 @@ pub fn prepare(log: Log) !*const boot.Info {
         },
         .framebuffer = try graphics.capture(services),
         .acpi_rsdp = findAcpi(table),
+        .trampoline = @intFromPtr(trampoline.ptr),
 
     };
 
@@ -96,6 +101,7 @@ fn console(comptime message: []const u8) void {
 pub fn reportFailure(name: []const u8) void {
 
     if (exit_attempted) return;
+
     console("\r\nBOOT FAILED: ");
 
     if (uefi.system_table.con_out) |output| {
@@ -107,6 +113,7 @@ pub fn reportFailure(name: []const u8) void {
                 byte,
 
             };
+
             _ = output.outputString(&character) catch return;
 
         }

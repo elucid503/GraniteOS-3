@@ -58,6 +58,7 @@ pub const Map = struct {
     pub fn read(self: *Map, services: *Services) MapError!uefi.Status {
 
         self.size = self.buffer.len;
+
         const status = services._getMemoryMap(&self.size, self.buffer.ptr, &self.key, &self.stride, &self.version);
 
         if (status == .buffer_too_small) return status;
@@ -66,6 +67,7 @@ pub const Map = struct {
         if (self.size > self.buffer.len) return MapError.InvalidMemoryMap;
 
         try validate(self.buffer[0..self.size], self.stride, self.version);
+
         return .success;
 
     }
@@ -77,6 +79,7 @@ pub const Map = struct {
             if (try self.read(services) != .success) return MapError.MemoryMapUnstable;
 
             attempted.* = true;
+
             const status = services._exitBootServices(handle, self.key);
 
             if (status == .success) {
@@ -108,7 +111,9 @@ fn validate(bytes: []const u8, stride: usize, version: u32) MapError!void {
 pub fn convert(bytes: []const u8, stride: usize, version: u32, regions: []boot.Region) MapError![]const boot.Region {
 
     try validate(bytes, stride, version);
+
     const count = bytes.len / stride;
+
     if (count > regions.len) return MapError.InvalidMemoryMap;
 
     for (0..count) |index| {
@@ -133,6 +138,7 @@ pub fn convert(bytes: []const u8, stride: usize, version: u32, regions: []boot.R
             else => .reserved,
 
         };
+
         regions[index] = .{
 
             .base = descriptor.physical_start,

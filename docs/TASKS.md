@@ -9,16 +9,16 @@
 - [x] Boot in VMware (UEFI ISO and GPT/FAT32 disk).
 - [ ] Boot on the initial Coffee Lake desktop (physical validation is deferred).
 
-Implementation, handoff contract, and validation details: [BOOT.md](BOOT.md).
-
 ## Milestone 2: Kernel
 
-- [ ] Physical and virtual memory management.
-- [ ] Process isolation and controlled hardware access.
-- [ ] Preemptive scheduling and multicore execution.
-- [ ] Interprocess communication.
-- [ ] Application loading and execution.
-- [ ] Kernel failure diagnostics and reboot.
+- [x] Physical and virtual memory management.
+- [x] Process isolation and controlled hardware access.
+- [x] Preemptive scheduling and multicore execution.
+- [x] Interprocess communication.
+- [x] Application loading and execution.
+- [x] Kernel failure diagnostics and reboot.
+
+Implementation, interfaces, validation, and current limits: [KERNEL.md](KERNEL.md).
 
 ## Milestone 3: Services
 

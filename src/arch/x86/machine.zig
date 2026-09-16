@@ -1,0 +1,342 @@
+const std = @import("std");
+
+const boot = @import("../../boot/info.zig");
+const process = @import("../../kernel/process.zig");
+const memory = @import("../../kernel/memory.zig");
+const acpi = @import("../../board/pc/acpi.zig");
+pub const apic = @import("../../board/pc/apic.zig");
+const cpu = @import("cpu.zig");
+const paging = @import("paging.zig");
+const context = @import("context.zig");
+const tables = @import("tables.zig");
+const Log = @import("../../debug/log.zig").Log;
+
+comptime {
+
+    _ = &@import("dispatch.zig").dispatch;
+
+}
+
+pub const Core = struct {
+
+    next: ?*Core = null,
+    id: u32,
+    online: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+
+    tables: tables.Tables = .{ },
+
+    stack: usize,
+    emergency: [3]usize,
+
+    current: ?*process.Process = null,
+    last_id: u64 = 0,
+    idle: context.Context,
+
+    ticks: u64 = 0,
+    switches: u64 = 0,
+    preemptions: u64 = 0,
+
+};
+
+pub var cores: ?*Core = null;
+pub var kernel: paging.Space = undefined;
+pub var core_count: usize = 0;
+
+var reset_port: u16 = 0;
+var reset_value: u8 = 0;
+
+extern fn idle() callconv(.c) noreturn;
+
+extern const trampoline_start: u8;
+extern const trampoline_end: u8;
+extern const trampoline_gdtr: u8;
+extern const trampoline_jump: u8;
+extern const trampoline_root: u8;
+extern const trampoline_stack: u8;
+extern const trampoline_entry: u8;
+extern const trampoline_argument: u8;
+extern const trampoline_long: u8;
+extern const trampoline_gdt: u8;
+
+pub fn prepare(info: *const boot.Info, frames: *memory.Frames, log: Log) !void {
+
+    cpu.features();
+
+    const firmware = try acpi.Acpi.init(info);
+    const madt = try firmware.find("APIC") orelse return error.MissingMadt;
+
+    try acpi.validateMadt(madt);
+
+    apic.base = acpi.read(u32, madt, 36);
+
+    var offset: usize = 44;
+
+    while (offset < madt.len) : (offset += madt[offset + 1]) {
+
+        if (madt[offset] == 5) apic.base = @intCast(acpi.read(u64, madt, offset + 4));
+
+    }
+
+    if (try firmware.find("FACP")) |fadt| {
+
+        if (fadt.len >= 129 and acpi.read(u32, fadt, 112) & (1 << 10) != 0 and fadt[116] == 1 and fadt[117] == 8 and fadt[118] == 0 and fadt[119] <= 1) {
+
+            const port = acpi.read(u64, fadt, 120);
+
+            if (port <= 65535) {
+
+                reset_port = @intCast(port);
+                reset_value = fadt[128];
+
+            }
+
+        }
+
+    }
+
+    kernel = try paging.Space.init(frames);
+    if (kernel.root >= 0x100000000) return error.HighBootstrapRoot;
+
+    for (info.memory) |region| {
+
+        switch (region.kind) {
+
+            .available, .loader, .firmware, .runtime, .acpi, .persistent => try kernel.identity(@intCast(region.base), @intCast(region.size), paging.writable | paging.nx),
+            else => {
+
+            },
+
+        }
+
+    }
+
+    try kernel.identity(apic.base, 4096, paging.writable | paging.nx | paging.uncached);
+    try kernel.protect(apic.base, paging.writable | paging.nx | paging.uncached);
+    if (info.framebuffer) |framebuffer| try kernel.identity(@intCast(framebuffer.base), @intCast(framebuffer.size), paging.writable | paging.nx | paging.uncached);
+
+    try protectImage(info);
+
+    try kernel.identity(@intCast(info.trampoline), 4096, paging.writable | paging.nx);
+    try kernel.protect(@intCast(info.trampoline), paging.writable);
+    try kernel.guard(0);
+
+    apic.init();
+
+    const bsp = apic.id();
+
+    try addCore(bsp, frames);
+
+    offset = 44;
+
+    while (offset < madt.len) : (offset += madt[offset + 1]) {
+
+        const kind = madt[offset];
+
+        if (kind != 0 and kind != 9) continue;
+
+        const id = if (kind == 0) @as(u32, madt[offset + 3]) else acpi.read(u32, madt, offset + 4);
+        const flags = acpi.read(u32, madt, offset + (if (kind == 0) @as(usize, 4) else 8));
+
+        if (flags & 1 == 0 or id == bsp) continue;
+        if (id > 255) return error.UnsupportedApic;
+
+        try addCore(id, frames);
+
+    }
+
+    tables.init();
+    paging.activate(kernel.root);
+
+    const current = local();
+
+    current.tables.load(current.stack, current.emergency);
+    current.online.store(true, .release);
+
+    apic.calibrate();
+
+    log.decimal("processors", core_count);
+    log.decimal("timer count", apic.timer_count);
+
+}
+
+fn addCore(id: u32, frames: *memory.Frames) !void {
+
+    var previous = cores;
+
+    while (previous) |core| : (previous = core.next) {
+
+        if (core.id == id) return error.DuplicateProcessor;
+
+    }
+
+    const core: *Core = @ptrFromInt(try frames.alloc());
+    const stack = try frames.allocRun(9);
+    const emergency = try frames.allocRun(9);
+
+    try kernel.guard(stack);
+    try kernel.guard(emergency);
+    try kernel.guard(emergency + 3 * 4096);
+    try kernel.guard(emergency + 6 * 4096);
+
+    core.* = .{
+
+        .next = cores,
+        .id = id,
+        .stack = stack + 9 * 4096,
+        .emergency = .{
+
+            emergency + 3 * 4096,
+            emergency + 6 * 4096,
+            emergency + 9 * 4096,
+
+        },
+        .idle = context.Context.init(@intFromPtr(&idle), stack + 9 * 4096 - 8, 0, true),
+
+    };
+
+    cores = core;
+    core_count += 1;
+
+}
+
+fn protectImage(info: *const boot.Info) !void {
+
+    const bytes = @as([*]const u8, @ptrFromInt(info.image.base))[0..info.image.size];
+    const pe = acpi.read(u32, bytes, 0x3c);
+    const count = acpi.read(u16, bytes, pe + 6);
+    const optional = acpi.read(u16, bytes, pe + 20);
+
+    for (0..count) |index| {
+
+        const section = pe + 24 + optional + index * 40;
+        const size = acpi.read(u32, bytes, section + 8);
+        const address = info.image.base + acpi.read(u32, bytes, section + 12);
+        const characteristics = acpi.read(u32, bytes, section + 36);
+        const executable = characteristics & 0x20000000 != 0;
+        const write = characteristics & 0x80000000 != 0;
+
+        if (executable and write) return error.WritableCode;
+
+        var page = address;
+
+        while (page < address + size) : (page += 4096) try kernel.protect(@intCast(page), (if (executable) @as(u64, 0) else paging.nx) | (if (write) paging.writable else @as(u64, 0)));
+
+    }
+
+}
+
+pub fn local() *Core {
+
+    const id = apic.id();
+    var current = cores;
+
+    while (current) |core| : (current = core.next) {
+
+        if (core.id == id) return core;
+
+    }
+
+    @panic("Unknown processor");
+
+}
+
+pub fn startOthers(info: *const boot.Info, entry: *const fn (*Core) callconv(.c) noreturn) !void {
+
+    const size = @intFromPtr(&trampoline_end) - @intFromPtr(&trampoline_start);
+
+    if (info.trampoline == 0 or info.trampoline >= 0x100000 or size > 4096) return error.InvalidTrampoline;
+
+    const blob = @as([*]u8, @ptrFromInt(info.trampoline))[0..size];
+
+    @memcpy(blob, @as([*]const u8, @ptrCast(&trampoline_start))[0..size]);
+    patch(u32, blob, &trampoline_gdtr, 2, @intCast(info.trampoline + relative(&trampoline_gdt)));
+    patch(u32, blob, &trampoline_jump, 0, @intCast(info.trampoline + relative(&trampoline_long)));
+    patch(u64, blob, &trampoline_root, 0, kernel.root);
+    patch(u64, blob, &trampoline_entry, 0, @intFromPtr(entry));
+
+    var current = cores;
+
+    while (current) |core| : (current = core.next) {
+
+        if (core.online.load(.acquire)) continue;
+
+        patch(u64, blob, &trampoline_stack, 0, core.stack);
+        patch(u64, blob, &trampoline_argument, 0, @intFromPtr(core));
+
+        apic.send(core.id, 0xc500);
+        apic.delay(10);
+        apic.send(core.id, 0x8500);
+        apic.delay(1);
+        apic.send(core.id, 0x600 | @as(u32, @intCast(info.trampoline >> 12)));
+        apic.delay(1);
+        if (!core.online.load(.acquire)) apic.send(core.id, 0x600 | @as(u32, @intCast(info.trampoline >> 12)));
+
+        const start = cpu.ticks();
+
+        while (!core.online.load(.acquire)) {
+
+            if (cpu.ticks() -% start > apic.tsc_per_ms * 1000) return error.ProcessorStartupTimeout;
+
+            cpu.relax();
+
+        }
+
+    }
+
+    try kernel.protect(@intCast(info.trampoline), paging.nx);
+    paging.activate(kernel.root);
+
+}
+
+fn relative(symbol: *const u8) usize {
+
+    return @intFromPtr(symbol) - @intFromPtr(&trampoline_start);
+
+}
+
+fn patch(comptime T: type, blob: []u8, symbol: *const u8, extra: usize, value: T) void {
+
+    std.mem.writeInt(T, blob[relative(symbol) + extra ..][0..@sizeOf(T)], value, .little);
+
+}
+
+pub fn reboot() noreturn {
+
+    if (reset_port != 0) cpu.out(reset_port, reset_value);
+    cpu.out(0xcf9, 2);
+    cpu.out(0xcf9, 6);
+
+    for (0..100000) |_| {
+
+        if (cpu.in(0x64) & 2 == 0) break;
+
+        cpu.relax();
+
+    }
+
+    cpu.out(0x64, 0xfe);
+
+    const empty = [_]u8{
+
+        0
+
+    } ** 10;
+    asm volatile ("lidt (%[idtr]); int3" : : [idtr] "r" (&empty), : .{ .memory = true, });
+    cpu.halt();
+
+}
+
+pub fn testGuard() noreturn {
+
+    const guard = local().stack - 9 * 4096;
+
+    asm volatile ("mov %[stack], %%rsp; pushq $0" : : [stack] "r" (guard + 4096), : .{ .memory = true, });
+    cpu.halt();
+
+}
+
+comptime {
+
+    if (@sizeOf(Core) > 4096) @compileError("CPU exceeds a page");
+
+}

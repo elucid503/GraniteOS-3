@@ -11,6 +11,7 @@ pub fn capture(services: *uefi.tables.BootServices) !?boot.Framebuffer {
     const mode = graphics.mode;
 
     if (mode.size_of_info < @sizeOf(Graphics.Mode.Info)) return null;
+
     const info = mode.info;
 
     if (info.pixel_format == .blt_only) return null;

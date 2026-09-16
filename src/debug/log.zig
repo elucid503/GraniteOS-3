@@ -42,14 +42,17 @@ pub const Log = struct {
     fn number(self: Log, label: []const u8, value: u64, comptime base: u8) void {
 
         const digits = "0123456789abcdef";
+
         var buffer: [20]u8 = undefined;
         var start = buffer.len;
+
         var remaining = value;
 
         while (true) {
 
             start -= 1;
             buffer[start] = digits[@intCast(remaining % base)];
+
             remaining /= base;
             if (remaining == 0) break;
 
