@@ -159,7 +159,7 @@ def typed():
 
 def attach(name):
     pipe = Pipe(name, timeout=30)
-    print("Connected to GraniteOS COM2. Ctrl+] disconnects and stops the VM.", flush=True)
+    print("Connected to GraniteOS 3. Ctrl+] disconnects and stops the VM.", flush=True)
     keys = typed()
     try:
         for key in keys:

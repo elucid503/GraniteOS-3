@@ -39,9 +39,9 @@ const groups = [_]Group{
         .commands = &.{
 
             command("help", "List available commands", help),
-            command("about", "About GraniteOS", about),
+            command("about", "About GraniteOS 3", about),
             command("clear", "Clear the terminal screen", clear),
-            command("echo TEXT", "Print text", echo),
+            command("echo", "Print some text back", echo),
             command("history", "List recent commands", history),
 
         },
@@ -52,9 +52,9 @@ const groups = [_]Group{
         .title = "system",
         .commands = &.{
 
-            command("id", "Print this shell's process identity", id),
+            command("id", "Print this process' identity", id),
             command("uptime", "Time since boot", uptime),
-            command("permissions", "List this shell's permissions", permissions),
+            command("permissions", "List this process' permissions", permissions),
             command("services", "List running services", services),
 
         },
@@ -66,8 +66,8 @@ const groups = [_]Group{
         .commands = &.{
 
             command("ping", "Call the helper service", ping),
-            command("crash NAME", "Crash a service (helper, serial)", crash),
-            command("restart NAME", "Restart a service (helper, serial)", restart),
+            command("crash", "Crash a service (helper, serial)", crash),
+            command("restart", "Restart a service (helper, serial)", restart),
 
         },
 
@@ -291,7 +291,7 @@ fn execute(text: []const u8) void {
 
 fn help(_: []const u8) Error!void {
 
-    try terminal.write("\nGraniteOS - Available Commands\n\n");
+    try terminal.write("\nGraniteOS 3 - Available Commands\n\n");
 
     for (groups) |group| {
 
