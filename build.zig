@@ -8,13 +8,7 @@ pub fn build(b: *std.Build) void {
 
     const options = b.addOptions();
 
-    options.addOption(bool, "panic_test", b.option(bool, "panic-test", "Exercise kernel diagnostics and hardware reboot") orelse false);
-    const self_test = b.option(bool, "self-test", "Run the embedded kernel acceptance workload") orelse true;
-    options.addOption(bool, "self_test", self_test);
-    options.addOption(bool, "guard_test", b.option(bool, "guard-test", "Exercise double-fault diagnostics on a guarded kernel stack") orelse false);
-    const service_options = b.addOptions();
-
-    service_options.addOption(bool, "self_test", b.option(bool, "service-test", "Exercise service recovery and application APIs") orelse self_test);
+    options.addOption(bool, "self_test", b.option(bool, "self-test", "Run the embedded kernel and service acceptance workload") orelse true);
 
     const application = b.addExecutable(.{
 
@@ -133,7 +127,7 @@ pub fn build(b: *std.Build) void {
         });
 
         program.root_module.addImport("api", api);
-        program.root_module.addOptions("options", service_options);
+        program.root_module.addOptions("options", options);
         program.root_module.addAssemblyFile(b.path("src/user/asm/entry.S"));
         program.setLinkerScript(b.path("src/user/asm/link.ld"));
         b.installArtifact(program);

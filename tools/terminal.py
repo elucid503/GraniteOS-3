@@ -1,13 +1,18 @@
-"""Connect to the guest COM2 terminal through a VMware Windows named pipe."""
+"""Talk to the guest COM2 terminal through a VMware Windows named pipe."""
 
-import argparse
 import ctypes
 from ctypes import wintypes
 import os
+import queue
 from pathlib import Path
 import re
+import subprocess
 import sys
+import threading
 import time
+
+PROMPT = b"obsidian [/]> "
+KEYS = {"H": b"\x1b[A", "P": b"\x1b[B", "M": b"\x1b[C", "K": b"\x1b[D", "G": b"\x1b[H", "O": b"\x1b[F", "S": b"\x1b[3~"}
 
 
 class Pipe:
@@ -33,7 +38,7 @@ class Pipe:
         self.kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
         deadline = time.monotonic() + timeout
         while True:
-            self.handle = self.kernel.CreateFileW(name, 0xC0000000, 0, None, 3, 0, None)
+            self.handle = self.kernel.CreateFileW(rf"\\.\pipe\{name}", 0xC0000000, 0, None, 3, 0, None)
             if self.handle != ctypes.c_void_p(-1).value:
                 break
             if time.monotonic() >= deadline:
@@ -75,7 +80,7 @@ def smoke(name, transcript):
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
             response.extend(pipe.read())
-            if response.endswith(b"granite> "):
+            if response.endswith(b"\n" + PROMPT):
                 captured.extend(response)
                 return response.decode("ascii", errors="replace")
             time.sleep(0.01)
@@ -88,14 +93,17 @@ def smoke(name, transcript):
 
     try:
         command(b"\r")
-        require("echo TEXT" in command(b"help\r"), "help")
+        require("Available Commands" in command(b"help\r"), "help")
         permissions = command(b"permissions\r")
         require(all(f"\r\n{name}\r\n" in permissions for name in ("ipc", "memory", "time")), "visible permission array")
         require("ports" not in permissions and "management" not in permissions, "application permission limits")
         require("\r\nhello services\r\n" in command(b"echo hello services\r"), "echo")
         require("\r\nfixed\r\n" in command(b"echo fixex\x08d\r"), "backspace")
-        require("^C\r\ngranite> " in command(b"echo discarded\x03"), "line cancellation")
-        require("unknown command" in command(b"unknown\r"), "unknown command")
+        require("^C\r\nobsidian [/]> " in command(b"echo discarded\x03"), "line cancellation")
+        require("\r\nheld\r\n" in command(b"echo hed\x1b[Dl\r"), "cursor editing")
+        require("\r\nheld\r\n" in command(b"\x1b[A\r"), "history recall")
+        require("\r\nipc\r\n" in command(b"perm\t\r"), "tab completion")
+        require("command not found" in command(b"unknown\r"), "unknown command")
         identity = re.findall(r"\r\n(\d+)\r\n", command(b"id\r"))
         require(bool(identity), "application identity")
         require("\r\n42\r\n" in command(b"ping\r"), "helper API")
@@ -103,7 +111,7 @@ def smoke(name, transcript):
         time.sleep(0.5)
         require("\r\n42\r\n" in command(b"ping\r"), "helper recovery")
         require(re.findall(r"\r\n(\d+)\r\n", command(b"id\r")) == identity, "shell survived restart")
-        require("serial: " in command(b"services\r"), "discovery")
+        require(re.search(r"serial +\d+", command(b"services\r")), "discovery")
         for _ in range(4):
             command(b"crash helper\r")
             time.sleep(0.5)
@@ -120,37 +128,64 @@ def smoke(name, transcript):
         pipe.close()
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--pipe", required=True)
-    args = parser.parse_args()
-    if os.name != "nt":
-        parser.error("Windows is required")
+def typed():
+    """Yield raw typed bytes (Ctrl+C included) from a Windows console, or from an MSYS pty when there is no console."""
     import msvcrt
 
-    pipe = Pipe(args.pipe)
-    print("Connected to GraniteOS COM2. Ctrl+] disconnects.")
+    kernel = ctypes.WinDLL("kernel32")
+    kernel.GetStdHandle.restype = wintypes.HANDLE
+    output, source = kernel.GetStdHandle(-11), kernel.GetStdHandle(-10)
+    mode = wintypes.DWORD()
+    if kernel.GetConsoleMode(output, ctypes.byref(mode)):
+        kernel.SetConsoleMode(output, mode.value | 4)
+    if kernel.GetConsoleMode(source, ctypes.byref(mode)):
+        kernel.SetConsoleMode(source, mode.value & ~1)
+        try:
+            while True:
+                key = msvcrt.getwch() if msvcrt.kbhit() else ""
+                yield KEYS.get(msvcrt.getwch(), b"") if key in ("\x00", "\xe0") else key.encode("ascii", errors="ignore")
+        finally:
+            kernel.SetConsoleMode(source, mode.value)
+
+    received = queue.Queue()
+    threading.Thread(target=lambda: [received.put(os.read(0, 64)) for _ in iter(int, 1)], daemon=True).start()
+    subprocess.run(["stty", "raw", "-echo"], stdin=sys.stdin, stderr=subprocess.DEVNULL)
     try:
         while True:
-            try:
-                data = pipe.read()
-                if data:
-                    sys.stdout.buffer.write(data)
-                    sys.stdout.buffer.flush()
-                if msvcrt.kbhit():
-                    key = msvcrt.getwch()
-                    if key == "\x1d":
-                        break
-                    if key in ("\x00", "\xe0"):
-                        msvcrt.getwch()
-                        continue
-                    pipe.write(key.encode("ascii", errors="ignore"))
-                time.sleep(0.005)
-            except KeyboardInterrupt:
-                pipe.write(b"\x03")
+            yield b"".join(received.get_nowait() for _ in range(received.qsize()))
     finally:
+        subprocess.run(["stty", "sane"], stdin=sys.stdin, stderr=subprocess.DEVNULL)
+
+
+def attach(name):
+    pipe = Pipe(name, timeout=30)
+    print("Connected to GraniteOS COM2. Ctrl+] disconnects and stops the VM.", flush=True)
+    keys = typed()
+    try:
+        for key in keys:
+            data = pipe.read()
+            if data:
+                sys.stdout.buffer.write(data)
+                sys.stdout.buffer.flush()
+            if b"\x1d" in key:
+                pipe.write(key[:key.index(b"\x1d")])
+                break
+            if key:
+                pipe.write(key)
+            else:
+                time.sleep(0.005)
+    finally:
+        keys.close()
         pipe.close()
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        if sys.argv[1:2] == ["smoke"] and len(sys.argv) == 4:
+            smoke(sys.argv[2], sys.argv[3])
+        elif sys.argv[1:2] == ["attach"] and len(sys.argv) == 3:
+            attach(sys.argv[2])
+        else:
+            sys.exit("Usage: terminal.py attach PIPE | smoke PIPE TRANSCRIPT")
+    except (RuntimeError, OSError) as error:
+        sys.exit(str(error))

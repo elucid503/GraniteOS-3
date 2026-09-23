@@ -1,4 +1,3 @@
-import argparse
 from pathlib import Path
 import struct
 import uuid
@@ -232,24 +231,13 @@ def disk_image(fat):
     return image
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Build FAT32, UEFI ISO, and GPT boot media")
-    parser.add_argument("--efi", type=Path, default=Path("zig-out/esp/EFI/BOOT/BOOTX64.EFI"))
-    parser.add_argument("--output", type=Path, default=Path("zig-out"))
-    args = parser.parse_args()
-
-    fat = fat_image(args.efi.read_bytes())
-    args.output.mkdir(parents=True, exist_ok=True)
-    (args.output / "esp.img").write_bytes(fat)
-
-    iso = args.output / "granite.iso"
-    iso.write_bytes(iso_image(fat))
-    print(iso.resolve())
-
-    disk = args.output / "granite.img"
-    disk.write_bytes(disk_image(fat))
-    print(disk.resolve())
+def build(efi, output):
+    fat = fat_image(efi.read_bytes())
+    output.mkdir(parents=True, exist_ok=True)
+    (output / "esp.img").write_bytes(fat)
+    (output / "granite.iso").write_bytes(iso_image(fat))
+    (output / "granite.img").write_bytes(disk_image(fat))
 
 
 if __name__ == "__main__":
-    main()
+    build(Path("zig-out/esp/EFI/BOOT/BOOTX64.EFI"), Path("zig-out"))

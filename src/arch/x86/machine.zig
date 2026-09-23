@@ -331,22 +331,6 @@ pub fn reboot() noreturn {
 
 }
 
-pub fn testGuard() noreturn {
-
-    const guard = local().stack - 9 * 4096;
-
-    asm volatile ("mov %[stack], %%rsp; pushq $0" // Push onto the guard page to test double faults.
-        :
-        : [stack] "r" (guard + 4096),
-        : .{
-
-            .memory = true,
-
-        });
-    cpu.halt();
-
-}
-
 comptime {
 
     if (@sizeOf(Core) > 4096) @compileError("CPU exceeds a page");

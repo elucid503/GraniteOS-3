@@ -60,8 +60,6 @@ pub fn start(info: *const boot.Info, output: Log) !noreturn {
     try machine.startOthers(info, secondary);
     log.line("all processors online");
 
-    if (options.panic_test) @panic("Requested kernel failure test");
-    if (options.guard_test) arch.machine.testGuard();
     if (!options.self_test) {
 
         try service.start();

@@ -28,7 +28,7 @@ pub export fn app_main(_: usize, _: usize, environment: *const api.abi.Environme
         const result: u64 = switch (protocol.operation(request.second)) {
 
             .hello => protocol.version,
-            .write => if (value <= 255 and write(@intCast(value))) 0 else protocol.invalid,
+            .write => if (write(value)) 0 else protocol.invalid,
             .read => if (input(5) & 1 != 0) input(0) else protocol.empty,
             .crash => if (request.first == api.raw(.owner, 0, 0, 0).first) fault() else protocol.invalid,
             else => protocol.invalid,
@@ -58,18 +58,21 @@ fn output(offset: u16, byte: u8) void {
 
 }
 
-fn write(byte: u8) bool {
+fn write(chunk: u56) bool {
 
     const deadline = api.ticks() + 10;
 
     while (input(5) & 0x20 == 0) {
 
         if (api.ticks() >= deadline) return false;
-        api.sleep(1);
+        _ = api.raw(.yield, 0, 0, 0);
 
     }
 
-    output(0, byte);
+    // An empty transmit FIFO holds 16 bytes, so a whole chunk fits without polling again.
+    var rest = chunk;
+
+    while (rest != 0) : (rest >>= 8) output(0, @truncate(rest));
 
     return true;
 
