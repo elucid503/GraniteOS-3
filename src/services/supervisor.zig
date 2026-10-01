@@ -5,7 +5,7 @@ const options = @import("options");
 
 const protocol = api.protocol;
 pub const panic = api.panic;
-var entries = [_]policy.Entry{ .{ }, .{ }, .{ }, .{ } };
+var entries = [_]policy.Entry{ .{ }, .{ }, .{ }, .{ }, .{ }, .{ } };
 
 var started = false;
 var test_finished = false;
@@ -58,7 +58,7 @@ fn maintain() void {
 
     for ([_]api.abi.Image{
 
-        .serial, .helper, .shell, .client
+        .serial, .helper, .storage, .files, .shell, .client
 
     }) |image| {
 
@@ -88,7 +88,7 @@ fn maintain() void {
         }
 
         entry.id = child.first;
-        if (image == .serial or image == .helper) {
+        if (image != .shell and image != .client) {
 
             const version = api.call(entry.id, protocol.pack(.hello, 0)) catch protocol.invalid;
             if (version != protocol.version) {
@@ -142,7 +142,7 @@ fn handle(request: api.Request) u64 {
         .crash, .restart => {
 
             if (request.first != shell and (!options.self_test or request.first != client)) return protocol.invalid;
-            if (value != @intFromEnum(api.abi.Image.helper) and value != @intFromEnum(api.abi.Image.serial)) return protocol.invalid;
+            if (value >= entries.len or value == @intFromEnum(api.abi.Image.shell) or value == @intFromEnum(api.abi.Image.client)) return protocol.invalid;
 
             const peer = entries[value].id;
 

@@ -1,12 +1,16 @@
+const std = @import("std");
+
 const root = @import("root.zig");
 const process = @import("process.zig");
 const ipc = @import("ipc.zig");
 const abi = @import("abi.zig");
+const pci = @import("../board/pc/pci.zig");
 
 var supervisor: u64 = 0;
 var restarting = false;
 var attempts: u8 = 0;
 var due: u64 = 0;
+var controller: ?pci.Bar = null;
 
 pub fn start() !void {
 
@@ -84,8 +88,14 @@ pub fn spawn(owner: *process.Process, image: abi.Image, argument: u64) !u64 {
         .shell => @embedFile("shell"),
         .helper => @embedFile("helper"),
         .client => @embedFile("client"),
+        .storage => @embedFile("storage"),
+        .files => @embedFile("files"),
 
     };
+
+    // AHCI: mass storage, SATA, AHCI 1.0; ABAR is BAR 5.
+    if (image == .storage and controller == null) controller = pci.find(0x010601, 5);
+    if (image == .storage and controller == null) return error.NoDevice;
 
     const task = try root.spawn(bytes, argument, owner.home);
     errdefer task.state = .dead;
@@ -106,6 +116,30 @@ pub fn spawn(owner: *process.Process, image: abi.Image, argument: u64) !u64 {
             .ipc
 
         }),
+        .storage => {
+
+            try task.configure(.service, &.{
+
+                .ipc, .time, .mmio, .dma, .diagnostics
+
+            });
+            const page = controller.?.base & ~@as(u64, 4095);
+
+            try task.grant(.mmio, page, std.mem.alignForward(u64, controller.?.base + controller.?.size, 4096) - page);
+            try task.grant(.log, 0, 1);
+            task.context.frame.rsi = controller.?.base;
+
+        },
+        .files => {
+
+            try task.configure(.service, &.{
+
+                .ipc, .diagnostics
+
+            });
+            try task.grant(.log, 0, 1);
+
+        },
         .shell, .client => {
 
         },

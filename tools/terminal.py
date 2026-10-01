@@ -11,7 +11,7 @@ import sys
 import threading
 import time
 
-PROMPT = b"obsidian [/]> "
+PROMPT = re.compile(rb"\nobsidian \[[^\]]*\]> $")
 KEYS = {"H": b"\x1b[A", "P": b"\x1b[B", "M": b"\x1b[C", "K": b"\x1b[D", "G": b"\x1b[H", "O": b"\x1b[F", "S": b"\x1b[3~"}
 
 
@@ -69,7 +69,7 @@ class Pipe:
             time.sleep(0.015)
 
 
-def smoke(name, transcript):
+def session(name, transcript, script):
     pipe = Pipe(name)
     captured = bytearray()
 
@@ -80,7 +80,7 @@ def smoke(name, transcript):
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
             response.extend(pipe.read())
-            if response.endswith(b"\n" + PROMPT):
+            if PROMPT.search(response):
                 captured.extend(response)
                 return response.decode("ascii", errors="replace")
             time.sleep(0.01)
@@ -93,39 +93,70 @@ def smoke(name, transcript):
 
     try:
         command(b"\r")
-        require("Available Commands" in command(b"help\r"), "help")
-        permissions = command(b"permissions\r")
-        require(all(f"\r\n{name}\r\n" in permissions for name in ("ipc", "memory", "time")), "visible permission array")
-        require("ports" not in permissions and "management" not in permissions, "application permission limits")
-        require("\r\nhello services\r\n" in command(b"echo hello services\r"), "echo")
-        require("\r\nfixed\r\n" in command(b"echo fixex\x08d\r"), "backspace")
-        require("^C\r\nobsidian [/]> " in command(b"echo discarded\x03"), "line cancellation")
-        require("\r\nheld\r\n" in command(b"echo hed\x1b[Dl\r"), "cursor editing")
-        require("\r\nheld\r\n" in command(b"\x1b[A\r"), "history recall")
-        require("\r\nipc\r\n" in command(b"perm\t\r"), "tab completion")
-        require("command not found" in command(b"unknown\r"), "unknown command")
-        identity = re.findall(r"\r\n(\d+)\r\n", command(b"id\r"))
-        require(bool(identity), "application identity")
-        require("\r\n42\r\n" in command(b"ping\r"), "helper API")
-        require("supervisor will recover" in command(b"crash helper\r"), "service crash")
-        time.sleep(0.5)
-        require("\r\n42\r\n" in command(b"ping\r"), "helper recovery")
-        require(re.findall(r"\r\n(\d+)\r\n", command(b"id\r")) == identity, "shell survived restart")
-        require(re.search(r"serial +\d+", command(b"services\r")), "discovery")
-        for _ in range(4):
-            command(b"crash helper\r")
-            time.sleep(0.5)
-            if "helper unavailable" in command(b"ping\r"):
-                break
-        else:
-            raise RuntimeError("Service restart limit was not enforced")
-        time.sleep(0.5)
-        require("helper unavailable" in command(b"ping\r"), "exhausted service stays offline")
-        require(re.findall(r"\r\n(\d+)\r\n", command(b"id\r")) == identity, "restart exhaustion isolates failure")
-        print("Interactive terminal and shell passed.")
+        script(command, require)
     finally:
         Path(transcript).write_bytes(captured)
         pipe.close()
+
+
+def smoke(command, require):
+    require("Available Commands" in command(b"help\r"), "help")
+    permissions = command(b"permissions\r")
+    require(all(f"\r\n{name}\r\n" in permissions for name in ("ipc", "memory", "time")), "visible permission array")
+    require("ports" not in permissions and "management" not in permissions, "application permission limits")
+    require("\r\nhello services\r\n" in command(b"echo hello services\r"), "echo")
+    require("\r\nfixed\r\n" in command(b"echo fixex\x08d\r"), "backspace")
+    require("^C\r\nobsidian [/]> " in command(b"echo discarded\x03"), "line cancellation")
+    require("\r\nheld\r\n" in command(b"echo hed\x1b[Dl\r"), "cursor editing")
+    require("\r\nheld\r\n" in command(b"\x1b[A\r"), "history recall")
+    require("\r\nipc\r\n" in command(b"perm\t\r"), "tab completion")
+    require("command not found" in command(b"unknown\r"), "unknown command")
+    identity = re.findall(r"\r\n(\d+)\r\n", command(b"id\r"))
+    require(bool(identity), "application identity")
+    require("\r\n42\r\n" in command(b"ping\r"), "helper API")
+    require("supervisor will recover" in command(b"crash helper\r"), "service crash")
+    time.sleep(0.5)
+    require("\r\n42\r\n" in command(b"ping\r"), "helper recovery")
+    require(re.findall(r"\r\n(\d+)\r\n", command(b"id\r")) == identity, "shell survived restart")
+    require(re.search(r"serial +\d+", command(b"services\r")), "discovery")
+    require(re.search(r"storage +\d+", command(b"services\r")), "storage service")
+    require("already exists" not in command(b"mkdir /docs\r"), "mkdir")
+    require("already exists" in command(b"mkdir docs\r"), "duplicate directory")
+    require("obsidian [/docs]> " in command(b"cd docs\r"), "working directory")
+    command(b"write note.txt hello granite\r")
+    require("\r\nhello granite\r\n" in command(b"cat note.txt\r"), "file contents")
+    require(re.search(r" 14  note\.txt\r\n", command(b"ls\r")), "file listing")
+    require("directory not empty" in command(b"rm /docs\r"), "non-empty directory removal")
+    require("obsidian [/]> " in command(b"cd ..\r"), "parent directory")
+    command(b"write scratch temporary\r")
+    command(b"rm scratch\r")
+    require("not found" in command(b"cat scratch\r"), "file removal")
+    require("docs/" in command(b"ls\r"), "root listing")
+    require(re.search(r"\d+ KiB total, \d+ KiB free", command(b"volume\r")), "volume usage")
+    for service in (b"files", b"storage"):
+        require("supervisor will recover" in command(b"crash " + service + b"\r"), f"{service.decode()} crash")
+        time.sleep(0.5)
+        require("\r\nhello granite\r\n" in command(b"cat /docs/note.txt\r"), f"{service.decode()} recovery")
+    for _ in range(4):
+        command(b"crash helper\r")
+        time.sleep(0.5)
+        if "helper unavailable" in command(b"ping\r"):
+            break
+    else:
+        raise RuntimeError("Service restart limit was not enforced")
+    time.sleep(0.5)
+    require("helper unavailable" in command(b"ping\r"), "exhausted service stays offline")
+    require(re.findall(r"\r\n(\d+)\r\n", command(b"id\r")) == identity, "restart exhaustion isolates failure")
+    print("Interactive terminal and shell passed.")
+
+
+def persist(command, require):
+    require("\r\nhello granite\r\n" in command(b"cat /docs/note.txt\r"), "file survived restart")
+    require("not found" in command(b"cat /scratch\r"), "removal survived restart")
+    command(b"rm /docs/note.txt\r")
+    command(b"rm /docs\r")
+    require("docs/" not in command(b"ls /\r"), "directory removal")
+    print("Persistent files passed.")
 
 
 def typed():
@@ -181,11 +212,11 @@ def attach(name):
 
 if __name__ == "__main__":
     try:
-        if sys.argv[1:2] == ["smoke"] and len(sys.argv) == 4:
-            smoke(sys.argv[2], sys.argv[3])
+        if sys.argv[1:2] in (["smoke"], ["persist"]) and len(sys.argv) == 4:
+            session(sys.argv[2], sys.argv[3], smoke if sys.argv[1] == "smoke" else persist)
         elif sys.argv[1:2] == ["attach"] and len(sys.argv) == 3:
             attach(sys.argv[2])
         else:
-            sys.exit("Usage: terminal.py attach PIPE | smoke PIPE TRANSCRIPT")
+            sys.exit("Usage: terminal.py attach PIPE | smoke|persist PIPE TRANSCRIPT")
     except (RuntimeError, OSError) as error:
         sys.exit(str(error))

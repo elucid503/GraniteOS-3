@@ -18,6 +18,8 @@ invoke:
     movq 8(%rbx), %rdi # Load the first argument.
     movq 16(%rbx), %rsi # Load the second argument.
     movq 24(%rbx), %rdx # Load the third argument.
+    movq 32(%rbx), %r10 # Load the fourth argument.
+    movq 40(%rbx), %r8 # Load the fifth argument.
 
     int $0x80 # Enter the kernel syscall handler.
 
@@ -25,6 +27,8 @@ invoke:
     movq %rdi, 8(%rbx) # Store the first result.
     movq %rsi, 16(%rbx) # Store the second result.
     movq %rdx, 24(%rbx) # Store the third result.
+    movq %r10, 32(%rbx) # Store the fourth result.
+    movq %r8, 40(%rbx) # Store the fifth result.
 
     popq %rbx # Restore the caller's RBX.
     retq # Return to the caller.

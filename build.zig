@@ -99,7 +99,7 @@ pub fn build(b: *std.Build) void {
 
     for ([_][]const u8{
 
-        "supervisor", "serial", "helper", "shell", "client",
+        "supervisor", "serial", "helper", "storage", "files", "shell", "client",
 
     }) |name| {
 

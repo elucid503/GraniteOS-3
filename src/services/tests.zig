@@ -3,6 +3,7 @@ const std = @import("std");
 const policy = @import("policy.zig");
 const line = @import("../apps/line.zig");
 const protocol = @import("../api/protocol.zig");
+const volume = @import("volume.zig");
 
 test "restart policy backs off and stops after three replacements" {
 
@@ -112,5 +113,128 @@ test "service protocol preserves operation and payload boundaries" {
     try std.testing.expectEqual(.ping, protocol.operation(message));
     try std.testing.expectEqual(value, protocol.value(message));
     try std.testing.expectEqual(@as(protocol.Operation, @enumFromInt(255)), protocol.operation(255));
+
+}
+
+const Memory = struct {
+
+    bytes: []u8,
+
+    pub fn read(self: Memory, lba: u64, out: []u8) volume.Error!void {
+
+        if (lba * 512 + out.len > self.bytes.len) return error.Device;
+        @memcpy(out, self.bytes[lba * 512 ..][0..out.len]);
+
+    }
+
+    pub fn write(self: Memory, lba: u64, bytes: []const u8) volume.Error!void {
+
+        if (lba * 512 + bytes.len > self.bytes.len) return error.Device;
+        @memcpy(self.bytes[lba * 512 ..][0..bytes.len], bytes);
+
+    }
+
+    pub fn flush(_: Memory) volume.Error!void {
+
+    }
+
+};
+
+test "volume persists fragmented files and directories and reclaims every block" {
+
+    const allocator = std.testing.allocator;
+    const disk = Memory{
+
+        .bytes = try allocator.alloc(u8, 8 << 20),
+
+    };
+    defer allocator.free(disk.bytes);
+    @memset(disk.bytes, 0);
+
+    var sector: [512]u8 = undefined;
+    const capacity = disk.bytes.len / 512;
+
+    try std.testing.expectEqual(null, try volume.find(disk, &sector, capacity));
+    @memcpy(disk.bytes[512..520], "EFI PART");
+    std.mem.writeInt(u64, disk.bytes[512 + 72 ..][0..8], 2, .little);
+    std.mem.writeInt(u32, disk.bytes[512 + 80 ..][0..4], 8, .little);
+    std.mem.writeInt(u32, disk.bytes[512 + 84 ..][0..4], 128, .little);
+
+    const record = disk.bytes[1024 + 5 * 128 ..][0..128];
+
+    @memcpy(record[0..16], &volume.partition);
+    std.mem.writeInt(u64, record[32..40], 64, .little);
+    std.mem.writeInt(u64, record[40..48], capacity - 1, .little);
+
+    const range = (try volume.find(disk, &sector, capacity)).?;
+
+    try std.testing.expectEqual(64, range.first);
+
+    const mounted = try allocator.create(volume.Volume(Memory));
+    defer allocator.destroy(mounted);
+
+    try std.testing.expect(try mounted.mount(disk, range));
+    const initial = mounted.usage();
+
+    try mounted.create("/docs", .directory);
+    try mounted.create("/docs/note", .file);
+    try mounted.write("/docs/note", 0, "hello");
+    try std.testing.expectError(error.Exists, mounted.create("/docs", .directory));
+    try std.testing.expectError(error.Invalid, mounted.create("/docs/note/child", .file));
+    try std.testing.expectError(error.Missing, mounted.write("/nowhere", 0, "x"));
+    try std.testing.expectError(error.Invalid, mounted.create("/docs/..", .file));
+
+    try mounted.create("/a", .file);
+    try mounted.create("/b", .file);
+
+    var block: [volume.block_size]u8 = undefined;
+
+    // Interleaving two files defeats contiguous growth, forcing continuation extent pages.
+    for (0..600) |index| {
+
+        @memset(&block, @truncate(index));
+        try mounted.write("/a", index * block.len, &block);
+        @memset(&block, @truncate(index +% 128));
+        try mounted.write("/b", index * block.len, &block);
+
+    }
+
+    try mounted.write("/docs/note", 10000, "!");
+
+    const again = try allocator.create(volume.Volume(Memory));
+    defer allocator.destroy(again);
+
+    try std.testing.expect(!try again.mount(disk, range));
+
+    var out: [volume.block_size]u8 = undefined;
+
+    try std.testing.expectEqual(out.len, try again.read("/docs/note", 0, &out));
+    try std.testing.expectEqualStrings("hello", out[0..5]);
+    try std.testing.expect(std.mem.allEqual(u8, out[5..], 0));
+    try std.testing.expectEqual(11, try again.read("/docs/note", 9990, &out));
+    try std.testing.expectEqualSlices(u8, &([_]u8{0} ** 10 ++ [_]u8{'!'}), out[0..11]);
+    try std.testing.expectEqual(0, try again.read("/docs/note", 10001, &out));
+
+    for ([_]usize{ 0, 253, 254, 255, 598 }) |index| {
+
+        try std.testing.expectEqual(200, try again.read("/a", index * block.len + 4000, out[0..200]));
+        try std.testing.expectEqual(@as(u8, @truncate(index)), out[0]);
+        try std.testing.expectEqual(@as(u8, @truncate(index + 1)), out[199]);
+
+    }
+
+    try std.testing.expectEqual(10001, (try again.entry("/docs", 0)).?.size);
+    try std.testing.expectEqualStrings("b", (try again.entry("/", 2)).?.name);
+    try std.testing.expectEqual(null, try again.entry("/", 3));
+
+    try std.testing.expectError(error.Busy, again.remove("/docs"));
+    try again.remove("/a");
+    try again.create("/b", .file);
+    try std.testing.expectEqual(0, try again.read("/b", 0, &out));
+    try again.remove("/docs/note");
+    try again.remove("/docs");
+    try again.remove("/b");
+    try std.testing.expectEqual(null, try again.entry("/", 0));
+    try std.testing.expectEqual(initial.free, again.usage().free);
 
 }

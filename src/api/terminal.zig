@@ -60,7 +60,7 @@ pub const Terminal = struct {
 
     pub fn print(self: *Terminal, comptime format: []const u8, arguments: anytype) api.ApiError!void {
 
-        var buffer: [512]u8 = undefined;
+        var buffer: [1024]u8 = undefined;
         const text = std.fmt.bufPrint(&buffer, format, arguments) catch return error.Invalid;
 
         try self.write(text);

@@ -96,22 +96,33 @@ pipe=GraniteOS-$action-$media
 mkdir -p "$directory"
 : > "$serial"
 
-if [ "$media" = disk ]; then
+descriptor() {
 
-    cp zig-out/granite.img "$directory/disk.img"
-    cat > "$directory/disk.vmdk" <<EOF
+    sectors=$(( $(wc -c < "$directory/$1.img") / 512 ))
+    cat > "$directory/$1.vmdk" <<EOF
 # Disk DescriptorFile
 version=1
 encoding="UTF-8"
 CID=fffffffe
 parentCID=ffffffff
 createType="monolithicFlat"
-RW $(( $(wc -c < zig-out/granite.img) / 512 )) FLAT "disk.img" 0
+RW $sectors FLAT "$1.img" 0
 ddb.adapterType = "ide"
-ddb.geometry.cylinders = "132"
+ddb.geometry.cylinders = "$(( sectors / 1008 ))"
 ddb.geometry.heads = "16"
 ddb.geometry.sectors = "63"
 EOF
+
+}
+
+# `run` keeps its data disk between sessions; `test` always starts blank.
+[ "$action" = run ] && [ -f "$directory/data.img" ] || cp zig-out/data.img "$directory/data.img"
+descriptor data
+
+if [ "$media" = disk ]; then
+
+    cp zig-out/granite.img "$directory/disk.img"
+    descriptor disk
     device='sata0:0.fileName = "disk.vmdk"'
 
 else
@@ -138,6 +149,8 @@ sata0.present = "TRUE"
 sata0:0.present = "TRUE"
 $device
 sata0:0.startConnected = "TRUE"
+sata0:1.present = "TRUE"
+sata0:1.fileName = "data.vmdk"
 serial0.present = "TRUE"
 serial0.fileType = "file"
 serial0.fileName = "$(cygpath -m "$project/$serial")"
@@ -181,22 +194,40 @@ kernel: process memory reclaimed
 kernel: ready
 services: ready
 services: supervisor recovered; children adopted
-services: recovery and application APIs passed'
+services: recovery and application APIs passed
+storage: ready'
 failure=': error: |Exception Type|services: acceptance failed'
-deadline=$(( $(date +%s) + 120 ))
 
-while :; do
+booted() {
 
-    ! grep -qE "$failure" "$serial" || fail "$(cat "$serial")"
+    deadline=$(( $(date +%s) + 120 ))
 
-    found=$(printf '%s\n' "$markers" | grep -oFf - "$serial" | sort -u | wc -l)
-    [ "$found" -ne "$(printf '%s\n' "$markers" | wc -l)" ] || [ "$(grep -c 'kernel: verified cpu = ' "$serial")" -ne "$cpus" ] || break
-    [ "$(date +%s)" -lt "$deadline" ] || fail "VMware test timed out. Inspect $serial"
-    sleep 0.2
+    while :; do
 
-done
+        ! grep -qE "$failure" "$serial" || fail "$(cat "$serial")"
 
+        found=$(printf '%s\n' "$markers" | grep -oFf - "$serial" | sort -u | wc -l)
+        [ "$found" -ne "$(printf '%s\n' "$markers" | wc -l)" ] || [ "$(grep -c 'kernel: verified cpu = ' "$serial")" -ne "$cpus" ] || break
+        [ "$(date +%s)" -lt "$deadline" ] || fail "VMware test timed out. Inspect $serial"
+        sleep 0.2
+
+    done
+
+}
+
+booted
 "$python" tools/terminal.py smoke "$pipe" "$directory/terminal.log"
-! grep -qE ': error: |services: acceptance failed' "$serial" || fail "$(cat "$serial")"
-cat "$serial"
+grep -q 'files: volume formatted' "$serial" || fail "$(cat "$serial")"
+
+# A full power cycle proves files reached the disk rather than a cache.
+"$vmrun" stop "$vmx" hard
+mv "$serial" "$directory/first.log"
+: > "$serial"
+"$vmrun" start "$vmx" nogui
+booted
+"$python" tools/terminal.py persist "$pipe" "$directory/persist.log"
+grep -q 'files: volume mounted' "$serial" || fail "$(cat "$serial")"
+
+! grep -qE ': error: |services: acceptance failed' "$directory/first.log" "$serial" || fail "$(cat "$directory/first.log" "$serial")"
+cat "$directory/first.log" "$serial"
 printf 'VMware test passed (%s CPUs, %s MB, %s).\n' "$cpus" "$memory" "$media"

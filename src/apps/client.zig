@@ -12,7 +12,7 @@ pub export fn app_main(_: usize, parent: usize, environment: *const api.abi.Envi
     forged.length = api.abi.permission_count;
     forged.permissions = .{
 
-        .ipc, .memory, .time, .ports, .mmio, .reboot, .diagnostics, .management
+        .ipc, .memory, .time, .ports, .mmio, .reboot, .diagnostics, .management, .dma
 
     };
 
@@ -50,6 +50,8 @@ fn run() !void {
     try expect(api.raw(.stop, supervisor, 0, 0).number == 1);
     try expect(api.raw(.write, 0, 0, 0).number == 1);
     try expect(api.raw(.reboot, 0, 0, 0).number == 1);
+    try expect(api.raw(.dma, 0, 0, 0).number == 1);
+    try expect(api.raw(.fetch, api.raw(.owner, 0, 0, 0).first, 0, 0).number == 1);
 
     const allocation = try api.checked(api.raw(.allocate, 0, 0, 0));
     const page: *volatile u64 = @ptrFromInt(allocation.first);

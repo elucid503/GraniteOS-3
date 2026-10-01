@@ -1,6 +1,10 @@
 pub const version = 1;
 pub const invalid = ~@as(u64, 0);
 pub const empty = invalid - 1;
+pub const missing = invalid - 2;
+pub const exists = invalid - 3;
+pub const full = invalid - 4;
+pub const busy = invalid - 5;
 
 pub const Operation = enum(u8) {
 
@@ -15,6 +19,13 @@ pub const Operation = enum(u8) {
     stall,
     restart,
     relaunch,
+    info,
+    flush,
+    list,
+    create,
+    directory,
+    remove,
+    volume,
     _,
 
 };

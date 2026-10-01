@@ -10,6 +10,9 @@ FAT_SECTORS = 1024
 DATA_SECTOR = RESERVED + 2 * FAT_SECTORS
 BLOCK = 2048
 IMAGE_BLOCK = 24
+DATA_SECTORS = 262144
+ESP = uuid.UUID("c12a7328-f81f-11d2-ba4b-00a0c93ec93b")
+GRANITE = uuid.UUID("c9fd8a72-4f14-4449-ae67-540225bb22a4")
 
 
 def check_efi(data):
@@ -189,9 +192,7 @@ def iso_image(fat):
     return image
 
 
-def disk_image(fat):
-    start = 2048
-    total = start + SECTORS + 2048
+def gpt(total, disk, partitions):
     image = bytearray(total * SECTOR)
     struct.pack_into(
         "<B3sB3sII", image, 446, 0, b"\0\x02\0", 0xEE,
@@ -200,13 +201,14 @@ def disk_image(fat):
     image[510:512] = b"\x55\xaa"
 
     entries = bytearray(128 * 128)
-    entries[:16] = uuid.UUID("c12a7328-f81f-11d2-ba4b-00a0c93ec93b").bytes_le
-    entries[16:32] = uuid.UUID("e90b7001-041b-482e-9e2c-6fbc9af36a01").bytes_le
+    for index, (kind, unique, first, last, name) in enumerate(partitions):
+        entry = index * 128
+        entries[entry:entry + 16] = kind.bytes_le
+        entries[entry + 16:entry + 32] = unique.bytes_le
+        struct.pack_into("<QQQ", entries, entry + 32, first, last, 0)
+        encoded = name.encode("utf-16-le")
+        entries[entry + 56:entry + 56 + len(encoded)] = encoded
 
-    struct.pack_into("<QQQ", entries, 32, start, start + SECTORS - 1, 0)
-
-    name = "GraniteOS Boot".encode("utf-16-le")
-    entries[56:56 + len(name)] = name
     entries_crc = zlib.crc32(entries)
 
     for current, backup, table in [(1, total - 1, 2), (total - 1, 1, total - 33)]:
@@ -215,14 +217,23 @@ def disk_image(fat):
         struct.pack_into(
             "<8sIIIIQQQQ16sQIII", header, 0,
             b"EFI PART", 0x10000, 92, 0, 0, current, backup, 34, total - 34,
-            uuid.UUID("ccefb72e-930c-421b-89d1-dd2fd90b3713").bytes_le,
-            table, 128, 128, entries_crc,
+            disk.bytes_le, table, 128, 128, entries_crc,
         )
 
         struct.pack_into("<I", header, 16, zlib.crc32(header[:92]))
 
         image[current * SECTOR:(current + 1) * SECTOR] = header
         image[table * SECTOR:table * SECTOR + len(entries)] = entries
+
+    return image
+
+
+def disk_image(fat):
+    start = 2048
+    total = start + SECTORS + 2048
+    image = gpt(total, uuid.UUID("ccefb72e-930c-421b-89d1-dd2fd90b3713"), [
+        (ESP, uuid.UUID("e90b7001-041b-482e-9e2c-6fbc9af36a01"), start, start + SECTORS - 1, "GraniteOS Boot"),
+    ])
 
     image[start * SECTOR:(start + SECTORS) * SECTOR] = fat
     for backup in (0, 6):
@@ -231,12 +242,19 @@ def disk_image(fat):
     return image
 
 
+def data_image():
+    return gpt(DATA_SECTORS, uuid.UUID("5b0e6d8c-2f4a-4c1e-9d3b-7a8f1e2c4d60"), [
+        (GRANITE, uuid.UUID("0d7c3a91-6e2b-4f85-b1a4-3c9e8f2d7b15"), 2048, DATA_SECTORS - 34, "GraniteOS Data"),
+    ])
+
+
 def build(efi, output):
     fat = fat_image(efi.read_bytes())
     output.mkdir(parents=True, exist_ok=True)
     (output / "esp.img").write_bytes(fat)
     (output / "granite.iso").write_bytes(iso_image(fat))
     (output / "granite.img").write_bytes(disk_image(fat))
+    (output / "data.img").write_bytes(data_image())
 
 
 if __name__ == "__main__":

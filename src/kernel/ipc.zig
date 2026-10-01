@@ -172,6 +172,7 @@ fn deliver(receiver: *Process, sender: *const Process) void {
         .first = sender.id,
         .second = sender.message,
         .third = sender.ticket,
+        .fourth = sender.length,
 
     });
 

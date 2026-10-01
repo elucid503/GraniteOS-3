@@ -30,8 +30,8 @@
 ## Milestone 4: Storage and Accounts
 
 - [ ] SATA and VMware storage support.
-- [ ] Filesystem selection and persistent files/directories.
-- [ ] File and volume sizes without arbitrary fixed limits.
+- [x] Filesystem selection and persistent files/directories.
+- [x] File and volume sizes without arbitrary fixed limits.
 - [ ] Multiple accounts, login, and administrator privileges.
 - [ ] Private home directories and access permissions.
 - [ ] Logout and screen locking.

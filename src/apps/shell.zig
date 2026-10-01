@@ -7,7 +7,6 @@ const api = @import("api");
 const protocol = api.protocol;
 pub const panic = api.panic;
 
-const prompt = "obsidian [/]> ";
 const Error = api.ApiError || error{Usage};
 
 const Command = struct {
@@ -41,7 +40,7 @@ const groups = [_]Group{
             command("help", "List available commands", help),
             command("about", "About GraniteOS 3", about),
             command("clear", "Clear the terminal screen", clear),
-            command("echo", "Print some text back", echo),
+            command("echo TEXT", "Print some text back", echo),
             command("history", "List recent commands", history),
 
         },
@@ -66,8 +65,24 @@ const groups = [_]Group{
         .commands = &.{
 
             command("ping", "Call the helper service", ping),
-            command("crash", "Crash a service (helper, serial)", crash),
-            command("restart", "Restart a service (helper, serial)", restart),
+            command("crash NAME", "Crash a service (helper, serial, storage, files)", crash),
+            command("restart NAME", "Restart a service (helper, serial, storage, files)", restart),
+
+        },
+
+    },
+    .{
+
+        .title = "files",
+        .commands = &.{
+
+            command("ls [PATH]", "List a directory", ls),
+            command("cd [PATH]", "Change the working directory", cd),
+            command("cat PATH", "Print a file", cat),
+            command("write PATH TEXT", "Replace a file with a line of text", write),
+            command("mkdir PATH", "Create a directory", mkdir),
+            command("rm PATH", "Remove a file or empty directory", rm),
+            command("volume", "Show volume capacity and free space", volume),
 
         },
 
@@ -76,6 +91,13 @@ const groups = [_]Group{
 };
 
 var terminal: api.Terminal = undefined;
+var files = api.Files{
+
+};
+
+var cwd: [200]u8 = undefined;
+var cwd_length: usize = 1;
+var target: [line.capacity + cwd.len]u8 = undefined;
 var editor = line.Line{
 
 };
@@ -90,13 +112,18 @@ pub export fn app_main(_: usize, supervisor: usize, environment: *const api.abi.
         .supervisor = supervisor,
 
     };
+    cwd[0] = '/';
 
     while (true) {
 
-        terminal.write("\nOBSIDIAN ......... Ready\n\nType 'help' for available commands.\n\n" ++ prompt) catch {
+        terminal.write("\nOBSIDIAN ......... Ready\n\nType 'help' for available commands.\n\n") catch {
 
             api.sleep(10);
             continue;
+
+        };
+
+        prompt() catch {
 
         };
 
@@ -164,13 +191,18 @@ fn handle(byte: u8) api.ApiError!void {
             try redraw();
 
         },
-        .cancel => try terminal.write("^C\n" ++ prompt),
+        .cancel => {
+
+            try terminal.write("^C\n");
+            try prompt();
+
+        },
         .submit => {
 
             defer editor.reset();
             try terminal.write("\n");
             execute(std.mem.trim(u8, editor.text(), " "));
-            try terminal.write(prompt);
+            try prompt();
 
         },
 
@@ -178,11 +210,17 @@ fn handle(byte: u8) api.ApiError!void {
 
 }
 
+fn prompt() api.ApiError!void {
+
+    try terminal.print("obsidian [{s}]> ", .{cwd[0..cwd_length]});
+
+}
+
 fn redraw() api.ApiError!void {
 
-    if (editor.cursor == editor.len) return terminal.print("\r" ++ prompt ++ "{s}\x1b[K", .{editor.text()});
+    if (editor.cursor == editor.len) return terminal.print("\robsidian [{s}]> {s}\x1b[K", .{ cwd[0..cwd_length], editor.text() });
 
-    try terminal.print("\r" ++ prompt ++ "{s}\x1b[K\x1b[{d}D", .{ editor.text(), editor.len - editor.cursor });
+    try terminal.print("\robsidian [{s}]> {s}\x1b[K\x1b[{d}D", .{ cwd[0..cwd_length], editor.text(), editor.len - editor.cursor });
 
 }
 
@@ -321,6 +359,7 @@ fn about(_: []const u8) Error!void {
         \\  - Isolated processes with kernel-enforced permissions
         \\  - Supervised services with crash recovery
         \\  - Serial terminal and OBSIDIAN shell
+        \\  - SATA storage and persistent files
         \\
         \\Type 'help' to see available commands.
         \\
@@ -374,7 +413,7 @@ fn permissions(_: []const u8) Error!void {
 
 fn services(_: []const u8) Error!void {
 
-    for ([_]api.abi.Image{ .serial, .helper, .shell }) |image| {
+    for ([_]api.abi.Image{ .serial, .helper, .storage, .files, .shell }) |image| {
 
         const peer = api.lookup(terminal.supervisor, image) catch {
 
@@ -413,9 +452,165 @@ fn restart(argument: []const u8) Error!void {
 fn control(operation: protocol.Operation, argument: []const u8) Error!void {
 
     const image = std.meta.stringToEnum(api.abi.Image, argument) orelse return error.Usage;
-    if (image != .helper and image != .serial) return error.Usage;
+    if (image == .shell or image == .client) return error.Usage;
 
     const result = try api.call(terminal.supervisor, protocol.pack(operation, @intCast(@intFromEnum(image))));
     try terminal.print("{s}: {s}\n", .{ argument, if (result == 0) "stopped; supervisor will recover it" else "request denied" });
+
+}
+
+fn ls(argument: []const u8) Error!void {
+
+    const path = try resolve(argument);
+    var entries: [32]api.files.Entry = undefined;
+    var index: u56 = 0;
+
+    while (true) {
+
+        const count = files.list(path, index, &entries) catch |err| return report("ls", err);
+        if (count == 0) return;
+
+        for (entries[0..count]) |entry| {
+
+            if (entry.kind == .directory) {
+
+                try terminal.print("{s:>12}  {s}/\n", .{ "-", entry.name });
+
+            } else {
+
+                try terminal.print("{d:>12}  {s}\n", .{ entry.size, entry.name });
+
+            }
+
+        }
+
+        index += @intCast(count);
+
+    }
+
+}
+
+fn cd(argument: []const u8) Error!void {
+
+    const path = try resolve(argument);
+    var entries: [1]api.files.Entry = undefined;
+
+    if (path.len > cwd.len) return terminal.write("cd: path too long\n");
+    _ = files.list(path, 0, &entries) catch |err| return report("cd", err);
+
+    @memcpy(cwd[0..path.len], path);
+    cwd_length = path.len;
+
+}
+
+fn cat(argument: []const u8) Error!void {
+
+    if (argument.len == 0) return error.Usage;
+
+    const path = try resolve(argument);
+    var offset: u56 = 0;
+    var last: u8 = '\n';
+
+    while (true) {
+
+        const bytes = files.read(path, offset, files.window.len) catch |err| return report("cat", err);
+        if (bytes.len == 0) break;
+
+        try terminal.write(bytes);
+        last = bytes[bytes.len - 1];
+        offset += @intCast(bytes.len);
+
+    }
+
+    if (last != '\n') try terminal.write("\n");
+
+}
+
+fn write(argument: []const u8) Error!void {
+
+    const split = std.mem.indexOfScalar(u8, argument, ' ') orelse return error.Usage;
+    const path = try resolve(argument[0..split]);
+    const body = std.mem.trimLeft(u8, argument[split..], " ");
+    var text: [line.capacity + 1]u8 = undefined;
+
+    @memcpy(text[0..body.len], body);
+    text[body.len] = '\n';
+
+    files.create(path) catch |err| return report("write", err);
+    files.write(path, 0, text[0 .. body.len + 1]) catch |err| return report("write", err);
+
+}
+
+fn mkdir(argument: []const u8) Error!void {
+
+    if (argument.len == 0) return error.Usage;
+    files.directory(try resolve(argument)) catch |err| return report("mkdir", err);
+
+}
+
+fn rm(argument: []const u8) Error!void {
+
+    if (argument.len == 0) return error.Usage;
+    files.remove(try resolve(argument)) catch |err| return report("rm", err);
+
+}
+
+fn volume(_: []const u8) Error!void {
+
+    const usage = files.usage() catch |err| return report("volume", err);
+
+    try terminal.print("{d} KiB total, {d} KiB free\n", .{ usage.total / 1024, usage.free / 1024 });
+
+}
+
+fn report(name: []const u8, err: api.files.FileError) Error!void {
+
+    const reason = switch (err) {
+
+        error.Missing => "not found",
+        error.Exists => "already exists",
+        error.Full => "volume full",
+        error.Busy => "directory not empty",
+        error.Invalid => "invalid path or type",
+        else => "files service unavailable",
+
+    };
+
+    try terminal.print("{s}: {s}\n", .{ name, reason });
+
+}
+
+/// Joins `argument` onto the working directory, folding `.` and `..`.
+fn resolve(argument: []const u8) Error![]const u8 {
+
+    const relative = argument.len == 0 or argument[0] != '/';
+    var length: usize = 0;
+
+    for ([_][]const u8{ if (relative) cwd[0..cwd_length] else "", argument }) |source| {
+
+        var parts = std.mem.tokenizeScalar(u8, source, '/');
+
+        while (parts.next()) |part| {
+
+            if (std.mem.eql(u8, part, ".")) continue;
+
+            if (std.mem.eql(u8, part, "..")) {
+
+                length = std.mem.lastIndexOfScalar(u8, target[0..length], '/') orelse 0;
+                continue;
+
+            }
+
+            if (length + 1 + part.len > target.len) return error.Usage;
+
+            target[length] = '/';
+            @memcpy(target[length + 1 ..][0..part.len], part);
+            length += 1 + part.len;
+
+        }
+
+    }
+
+    return if (length == 0) "/" else target[0..length];
 
 }

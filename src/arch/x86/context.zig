@@ -47,6 +47,8 @@ pub const Context = extern struct {
             .first = self.frame.rdi,
             .second = self.frame.rsi,
             .third = self.frame.rdx,
+            .fourth = self.frame.r10,
+            .fifth = self.frame.r8,
 
         };
 
@@ -58,6 +60,8 @@ pub const Context = extern struct {
         self.frame.rdi = request_value.first;
         self.frame.rsi = request_value.second;
         self.frame.rdx = request_value.third;
+        self.frame.r10 = request_value.fourth;
+        self.frame.r8 = request_value.fifth;
 
     }
 

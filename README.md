@@ -14,6 +14,6 @@ and stops the VM. `test` runs the host tests, then the kernel, service, and
 shell acceptance checks. Both accept `--media disk`, `--cpus N`, and
 `--memory MB`.
 
-Services form a distinct kernel-recognized layer with explicit, readable
-permission arrays enforced by the kernel. COM1 carries diagnostics; COM2
-provides the terminal and shell. [Service architecture and API](docs/SERVICES.md).
+Each VM gets a second SATA disk holding the GraniteOS volume. `run` keeps it
+between sessions (`zig-out/vm/run-<media>/data.img`); `test` starts it blank
+and checks that files survive a power cycle.

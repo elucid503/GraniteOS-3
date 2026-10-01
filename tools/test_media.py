@@ -68,6 +68,24 @@ class MediaTest(unittest.TestCase):
 
     def test_gpt_primary_backup_checksums_and_esp(self):
         disk = media.disk_image(self.fat)
+        for entries in self.gpt(disk):
+            self.assertEqual(uuid.UUID(bytes_le=bytes(entries[:16])), media.ESP)
+            first, last = struct.unpack_from("<QQ", entries, 32)
+            self.assertEqual((last - first + 1) * 512, len(self.fat))
+            hidden, = struct.unpack_from("<I", disk, first * 512 + 28)
+            self.assertEqual(first, hidden)
+            self.assertEqual(disk[first * 512 + 4096:(last + 1) * 512], self.fat[4096:])
+
+    def test_data_disk_holds_one_blank_granite_partition(self):
+        disk = media.data_image()
+        for entries in self.gpt(disk):
+            self.assertEqual(uuid.UUID(bytes_le=bytes(entries[:16])), media.GRANITE)
+            first, last = struct.unpack_from("<QQ", entries, 32)
+            self.assertLess(last, len(disk) // 512 - 33)
+            self.assertEqual(entries[128:256], bytes(128))
+            self.assertFalse(any(disk[first * 512:(first + 8) * 512]))
+
+    def gpt(self, disk):
         self.assertEqual(disk[450], 0xEE)
         total = len(disk) // 512
         for lba in (1, total - 1):
@@ -82,15 +100,7 @@ class MediaTest(unittest.TestCase):
             table, count, size, crc = struct.unpack_from("<QIII", header, 72)
             entries = disk[table * 512:table * 512 + count * size]
             self.assertEqual(zlib.crc32(entries), crc)
-            self.assertEqual(
-                uuid.UUID(bytes_le=bytes(entries[:16])),
-                uuid.UUID("c12a7328-f81f-11d2-ba4b-00a0c93ec93b"),
-            )
-            first, last = struct.unpack_from("<QQ", entries, 32)
-            self.assertEqual((last - first + 1) * 512, len(self.fat))
-            hidden, = struct.unpack_from("<I", disk, first * 512 + 28)
-            self.assertEqual(first, hidden)
-            self.assertEqual(disk[first * 512 + 4096:(last + 1) * 512], self.fat[4096:])
+            yield entries
 
     def test_rejects_non_efi_inputs(self):
         with self.assertRaises(ValueError):

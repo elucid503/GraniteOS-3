@@ -4,6 +4,8 @@ pub const Request = extern struct {
     first: u64 = 0,
     second: u64 = 0,
     third: u64 = 0,
+    fourth: u64 = 0,
+    fifth: u64 = 0,
 
 };
 
@@ -29,6 +31,9 @@ pub const Call = enum(u64) {
     sleep = 17,
     stop = 18,
     owner = 19,
+    dma = 20,
+    fetch = 21,
+    store = 22,
     _,
 
 };
@@ -52,6 +57,8 @@ pub const Image = enum(u64) {
     shell,
     helper,
     client,
+    storage,
+    files,
 
 };
 
@@ -72,6 +79,7 @@ pub const Permission = enum(u32) {
     reboot,
     diagnostics,
     management,
+    dma,
 
 };
 

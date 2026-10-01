@@ -3,6 +3,8 @@ const std = @import("std");
 pub const abi = @import("abi");
 pub const protocol = @import("protocol.zig");
 pub const Terminal = @import("terminal.zig").Terminal;
+pub const files = @import("files.zig");
+pub const Files = files.Files;
 pub const Request = abi.Request;
 pub const ApiError = error{ Denied, Invalid, Missing, Deadlock, Exhausted, Timeout, Busy };
 var environment: ?*const abi.Environment = null;
@@ -76,6 +78,79 @@ pub fn checked(request: Request) ApiError!Request {
 pub fn call(peer: u64, message: u64) ApiError!u64 {
 
     return (try checked(raw(.call, peer, message, 100))).first;
+
+}
+
+/// Lends `window` to the peer until it replies; the peer reads and writes it with `fetch` and `store`.
+pub fn exchange(peer: u64, message: u64, window: []u8) ApiError!u64 {
+
+    var request = Request{
+
+        .number = @intFromEnum(abi.Call.call),
+        .first = peer,
+        .second = message,
+        .third = 1000,
+        .fourth = @intFromPtr(window.ptr),
+        .fifth = window.len,
+
+    };
+
+    invoke(&request);
+
+    return (try checked(request)).first;
+
+}
+
+/// Copies from the window lent by a pending `request` into `bytes`.
+pub fn fetch(request: Request, offset: u64, bytes: []u8) ApiError!void {
+
+    try transfer(.fetch, request, offset, @intFromPtr(bytes.ptr), bytes.len);
+
+}
+
+/// Copies `bytes` into the window lent by a pending `request`.
+pub fn store(request: Request, offset: u64, bytes: []const u8) ApiError!void {
+
+    try transfer(.store, request, offset, @intFromPtr(bytes.ptr), bytes.len);
+
+}
+
+fn transfer(number: abi.Call, request: Request, offset: u64, address: u64, length: u64) ApiError!void {
+
+    var copy = Request{
+
+        .number = @intFromEnum(number),
+        .first = request.first,
+        .second = request.third,
+        .third = offset,
+        .fourth = address,
+        .fifth = length,
+
+    };
+
+    invoke(&copy);
+    _ = try checked(copy);
+
+}
+
+pub const Page = struct {
+
+    bytes: *align(4096) [4096]u8,
+    physical: u64,
+
+};
+
+/// Allocates a zeroed page that devices may access directly.
+pub fn dma() ApiError!Page {
+
+    const result = try checked(raw(.dma, 0, 0, 0));
+
+    return .{
+
+        .bytes = @ptrFromInt(result.first),
+        .physical = result.second,
+
+    };
 
 }
 

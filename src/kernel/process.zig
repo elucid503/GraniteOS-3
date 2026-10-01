@@ -59,6 +59,9 @@ pub const Process = struct {
     image: ?abi.Image = null,
     generation: u64 = 0,
 
+    buffer: u64 = 0,
+    length: u64 = 0,
+
     home: u32,
     preemptions: usize = 0,
 

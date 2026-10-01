@@ -8,7 +8,7 @@ const abi = @import("abi.zig");
 const service = @import("service.zig");
 
 const paging = arch.paging;
-const CallError = paging.MapError || ipc.IpcError || @import("elf.zig").LoadError || error{ Denied, Invalid, Busy, ProcessIdsExhausted, InvalidProcessor };
+const CallError = paging.MapError || ipc.IpcError || @import("elf.zig").LoadError || error{ Denied, Invalid, Busy, ProcessIdsExhausted, InvalidProcessor, NoDevice };
 
 pub fn handle(task: *process.Process, ticks: u64) void {
 
@@ -19,7 +19,7 @@ pub fn handle(task: *process.Process, ticks: u64) void {
         request.number = switch (err) {
 
             error.Denied, error.PermissionDenied => 1,
-            error.NoProcess => 3,
+            error.NoProcess, error.NoDevice => 3,
             error.Deadlock => 4,
             error.OutOfMemory, error.Exhausted, error.ProcessIdsExhausted => 5,
             error.Busy => 7,
@@ -45,7 +45,12 @@ fn invoke(task: *process.Process, ticks: u64, frame: *abi.Request) CallError!voi
 
         },
         .exit => root.exited(task, frame.first),
-        .send => try ipc.send(root.processes, task, frame.first, frame.second),
+        .send => {
+
+            task.length = 0;
+            try ipc.send(root.processes, task, frame.first, frame.second);
+
+        },
         .receive => {
 
             if (!task.policy.permits(.ipc)) return error.Denied;
@@ -131,7 +136,11 @@ fn invoke(task: *process.Process, ticks: u64, frame: *abi.Request) CallError!voi
         .call => {
 
             if (frame.third == 0 or frame.third > 6000 or ticks > ~@as(u64, 0) - frame.third) return error.Invalid;
+            if (frame.fifth != 0 and (frame.fourth < paging.user_base or frame.fourth >= paging.user_end or frame.fifth > paging.user_end - frame.fourth)) return error.Invalid;
             const destination = if (frame.first == 0) try service.endpoint(task.owner) else frame.first;
+
+            task.buffer = frame.fourth;
+            task.length = frame.fifth;
             try ipc.call(root.processes, task, destination, frame.second, ticks + frame.third);
 
         },
@@ -189,7 +198,49 @@ fn invoke(task: *process.Process, ticks: u64, frame: *abi.Request) CallError!voi
             child.state = .dead;
 
         },
+        .dma => {
+
+            if (!task.policy.permits(.dma)) return error.Denied;
+            const address = try task.vacant();
+
+            // ponytail: DMA pages leak on exit since a device may still write them; reclaim once drivers quiesce devices on exit.
+            frame.second = try task.space.allocate(address, paging.user | paging.writable | paging.nx | paging.borrowed);
+            task.mapped(address);
+
+            frame.first = address;
+
+        },
+        .fetch, .store => {
+
+            if (!task.policy.permits(.ipc)) return error.Denied;
+            const client = ipc.find(root.processes, frame.first) orelse return error.NoProcess;
+
+            if (client.state != .replying or client.destination != task.id or client.ticket != frame.second) return error.Denied;
+            if (frame.fifth > 0x10000 or frame.third > client.length or frame.fifth > client.length - frame.third) return error.Invalid;
+
+            const remote = client.buffer + frame.third;
+
+            if (number == @intFromEnum(abi.Call.fetch)) try copy(client, remote, task, frame.fourth, frame.fifth) else try copy(task, frame.fourth, client, remote, frame.fifth);
+
+        },
         else => return error.Invalid,
+
+    }
+
+}
+
+fn copy(source: *process.Process, from: u64, target: *process.Process, to: u64, length: u64) !void {
+
+    var offset: u64 = 0;
+
+    while (offset < length) {
+
+        const input = try source.space.translate(from + offset, false);
+        const output = try target.space.translate(to + offset, true);
+        const size = @min(length - offset, 4096 - (input & 4095), 4096 - (output & 4095));
+
+        @memcpy(@as([*]u8, @ptrFromInt(output))[0..size], @as([*]const u8, @ptrFromInt(input))[0..size]);
+        offset += size;
 
     }
 

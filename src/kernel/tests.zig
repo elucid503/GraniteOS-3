@@ -249,13 +249,14 @@ fn task(id: u64) process.Process {
     value.home = 0;
     value.ticket = 0;
     value.deadline = 0;
+    value.length = 0;
     value.policy = .{
 
         .layer = .service,
         .length = abi.permission_count,
         .permissions = .{
 
-            .ipc, .memory, .time, .ports, .mmio, .reboot, .diagnostics, .management
+            .ipc, .memory, .time, .ports, .mmio, .reboot, .diagnostics, .management, .dma
 
         },
 
