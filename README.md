@@ -12,7 +12,9 @@ sh tools/vmware.sh test
 `run` builds, boots, and attaches to the Obsidian shell; Ctrl+] disconnects
 and stops the VM. The VMware window shows the graphical login; click inside it
 to capture the mouse and keyboard, and Ctrl+Alt releases them. After login,
-Ctrl+Shift+L locks the screen and Ctrl+Shift+Q logs out. `test` runs the host tests, then the kernel, service, and
+the desktop's top bar opens Notes, locks the screen, or logs out (Ctrl+Shift+L and
+Ctrl+Shift+Q also work while the desktop has focus); logging out closes the session's apps.
+An administrator's `display WIDTHxHEIGHT` switches the screen mode live and keeps it across boots. `test` runs the host tests, then the kernel, service, and
 shell acceptance checks. Both accept `--media disk`, `--cpus N`, and
 `--memory MB`.
 

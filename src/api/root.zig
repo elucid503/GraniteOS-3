@@ -293,6 +293,58 @@ pub fn query(endpoint: *u64, image: abi.Image, message: u64, window: []u8) Servi
 
 }
 
+/// Starts app `name` running as the caller, in the caller's session; only signed-in sessions may.
+pub fn launch(name: []const u8) ServiceError!void {
+
+    var bytes: [32]u8 = undefined;
+    if (name.len > bytes.len) return error.Invalid;
+
+    @memcpy(bytes[0..name.len], name);
+    try supervised(try exchange(0, protocol.pack(.launch, 0), bytes[0..name.len]));
+
+}
+
+/// Stops every app of the caller's session; the login process calls it on logout.
+pub fn end() ServiceError!void {
+
+    try supervised(try call(0, protocol.pack(.end, 0)));
+
+}
+
+/// Supervisor-only: spawns `image` as an application running as the sender of `request`, which must still await our reply.
+pub fn spawn(image: abi.Image, request: Request) ApiError!u64 {
+
+    var message = Request{
+
+        .number = @intFromEnum(abi.Call.spawn),
+        .first = @intFromEnum(image),
+        .third = request.first,
+        .fourth = request.third,
+
+    };
+
+    invoke(&message);
+
+    return (try checked(message)).first;
+
+}
+
+fn supervised(result: u64) ServiceError!void {
+
+    return switch (result) {
+
+        protocol.missing => error.Missing,
+        protocol.full => error.Full,
+        protocol.denied => error.Denied,
+        protocol.invalid => error.Invalid,
+        else => {
+
+        },
+
+    };
+
+}
+
 /// The identity the kernel attached to a received message.
 pub fn sender(message: Request) abi.Identity {
 
@@ -303,7 +355,7 @@ pub fn sender(message: Request) abi.Identity {
 /// Reads (`write` false) or writes a global firmware variable; returns the variable's size.
 pub fn variable(name: []const u16, data: []u8, write: bool) ApiError!usize {
 
-    var call_request = Request{
+    var message = Request{
 
         .number = @intFromEnum(abi.Call.variable),
         .first = @intFromPtr(name.ptr),
@@ -314,9 +366,9 @@ pub fn variable(name: []const u16, data: []u8, write: bool) ApiError!usize {
 
     };
 
-    invoke(&call_request);
+    invoke(&message);
 
-    return (try checked(call_request)).first;
+    return (try checked(message)).first;
 
 }
 

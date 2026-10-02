@@ -79,6 +79,7 @@ const groups = [_]Group{
             command("uptime", "Time since boot", uptime),
             command("permissions", "List this process' permissions", permissions),
             command("services", "List running services", services),
+            command("display [WIDTHxHEIGHT]", "Show or set the screen mode (administrators)", display),
             command("install", "Install GraniteOS beside the existing OS", install),
             command("reboot", "Restart the machine", reboot),
             command("shutdown", "Power off the machine", shutdown),
@@ -683,6 +684,26 @@ fn services(_: []const u8) Error!void {
         try terminal.print("  {s:<10}{d}\n", .{ @tagName(image), peer });
 
     }
+
+}
+
+fn display(argument: []const u8) Error!void {
+
+    var screen = api.Display{};
+
+    if (argument.len == 0) {
+
+        const size = screen.size() catch |err| return report("display", err);
+
+        return terminal.print("{d}x{d}\n", .{ size.width, size.height });
+
+    }
+
+    const split = std.mem.indexOfScalar(u8, argument, 'x') orelse return error.Usage;
+    const width = std.fmt.parseInt(u16, argument[0..split], 10) catch return error.Usage;
+    const height = std.fmt.parseInt(u16, argument[split + 1 ..], 10) catch return error.Usage;
+
+    screen.mode(width, height) catch |err| return report("display", err);
 
 }
 

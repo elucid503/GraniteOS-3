@@ -100,6 +100,7 @@ pub fn spawn(owner: *process.Process, image: abi.Image, argument: u64) !u64 {
         .display => @embedFile("display"),
         .input => @embedFile("input"),
         .login => @embedFile("login"),
+        .notes => @embedFile("notes"),
 
     };
 
@@ -242,7 +243,7 @@ pub fn spawn(owner: *process.Process, image: abi.Image, argument: u64) !u64 {
             try listen(task, 12);
 
         },
-        .shell, .client, .login => {
+        .shell, .client, .login, .notes => {
 
         },
 
@@ -253,6 +254,18 @@ pub fn spawn(owner: *process.Process, image: abi.Image, argument: u64) !u64 {
     try owner.grant(.send, task.id, 1);
 
     return task.id;
+
+}
+
+/// Images that run with application permissions.
+pub fn application(image: abi.Image) bool {
+
+    return switch (image) {
+
+        .shell, .client, .login, .notes => true,
+        else => false,
+
+    };
 
 }
 

@@ -2,6 +2,9 @@ const std = @import("std");
 
 const font = @import("font.zig");
 const canvas = @import("canvas.zig");
+const draw = @import("draw.zig");
+const node = @import("node.zig");
+const text = @import("text.zig");
 
 test "font rasterizes every printable ASCII glyph with solid stems and open counters" {
 
@@ -91,5 +94,227 @@ test "canvas clips fills, rounds corners, and blits only the overlap" {
     target.label(font.sans(), "Hi", 16, target.bounds(), 0x000000, .center);
 
     try std.testing.expect(std.mem.indexOfScalar(u32, &pixels, 0x000000) != null);
+
+}
+
+test "flex layout grows, centres, and stretches children and reports what moved" {
+
+    var fixed = node.Node{
+
+        .style = .{
+
+            .width = 40,
+            .height = 10,
+
+        },
+
+    };
+    var grown = node.Node{
+
+        .style = .{
+
+            .grow = 1,
+
+        },
+
+    };
+    var hidden = node.Node{
+
+        .hidden = true,
+
+    };
+    var row = node.Node{
+
+        .style = .{
+
+            .direction = .row,
+            .gap = 4,
+            .items = .center,
+            .padding = .all(2),
+
+        },
+        .content = .{
+
+            .box = &.{ &fixed, &hidden, &grown },
+
+        },
+
+    };
+    var damage = canvas.Rect{};
+
+    row.arrange(.{
+
+        .width = 100,
+        .height = 30,
+
+    }, &damage);
+
+    try std.testing.expectEqual(canvas.Rect{ .x = 2, .y = 10, .width = 40, .height = 10 }, fixed.rect);
+    try std.testing.expectEqual(canvas.Rect{ .x = 46, .y = 15, .width = 52, .height = 0 }, grown.rect);
+    try std.testing.expectEqual(canvas.Rect{}, hidden.rect);
+    try std.testing.expectEqual(canvas.Rect{ .width = 100, .height = 30 }, damage);
+
+    var column = node.Node{
+
+        .style = .{
+
+            .justify = .center,
+
+        },
+        .content = .{
+
+            .box = &.{&fixed},
+
+        },
+
+    };
+
+    damage = .{};
+    column.arrange(.{
+
+        .width = 100,
+        .height = 30,
+
+    }, &damage);
+
+    try std.testing.expectEqual(canvas.Rect{ .y = 10, .width = 40, .height = 10 }, fixed.rect);
+
+}
+
+test "text wraps after spaces and moves the caret between wrapped lines" {
+
+    const face = font.sans();
+    const width: i32 = @intFromFloat(face.measure("hello ", 20 / face.units) + 1);
+    var lines = text.Lines.init(face, "hello world\nx", 20, width);
+
+    try std.testing.expectEqual(text.Line{ .start = 0, .end = 6 }, lines.next().?);
+    try std.testing.expectEqual(text.Line{ .start = 6, .end = 11 }, lines.next().?);
+    try std.testing.expectEqual(text.Line{ .start = 12, .end = 13 }, lines.next().?);
+    try std.testing.expectEqual(null, lines.next());
+
+    var bytes = "hello world\nx".*;
+    var edit = text.Text{
+
+        .buffer = &bytes,
+        .length = bytes.len,
+        .caret = 1,
+
+    };
+
+    try std.testing.expect(edit.vertical(face, 20, width, 1));
+    try std.testing.expectEqual(7, edit.caret);
+    try std.testing.expect(edit.vertical(face, 20, width, 1));
+    try std.testing.expectEqual(13, edit.caret);
+    try std.testing.expect(!edit.vertical(face, 20, width, 1));
+
+}
+
+test "recorded commands replay exactly as direct drawing and survive hostile bytes" {
+
+    var bytes: [1024]u8 align(4) = undefined;
+    var list = draw.List{
+
+        .bytes = &bytes,
+        .width = 32,
+        .height = 24,
+
+    };
+
+    list.fill(list.bounds(), 0x202020);
+    list.limit = .{
+
+        .x = 2,
+        .width = 28,
+        .height = 20,
+
+    };
+    list.round(.{
+
+        .x = -4,
+        .y = 2,
+        .width = 40,
+        .height = 20,
+
+    }, 8, 0xffffff);
+    list.label("Hi", 16, list.bounds(), 0x000000, .center);
+
+    var direct = [_]u32{0} ** (32 * 24);
+    var replayed = [_]u32{0} ** (32 * 24);
+    var expected = canvas.Canvas{
+
+        .pixels = &direct,
+        .width = 32,
+        .height = 24,
+
+    };
+    var actual = canvas.Canvas{
+
+        .pixels = &replayed,
+        .width = 32,
+        .height = 24,
+
+    };
+
+    expected.fill(expected.bounds(), 0x202020);
+    expected.limit = list.limit;
+    expected.round(.{
+
+        .x = -4,
+        .y = 2,
+        .width = 40,
+        .height = 20,
+
+    }, 8, 0xffffff);
+    expected.label(font.sans(), "Hi", 16, expected.bounds(), 0x000000, .center);
+    draw.replay(&actual, list.commands(), .{}, actual.bounds());
+
+    try std.testing.expectEqualSlices(u32, &direct, &replayed);
+
+    // Truncated, oversized, and garbage commands are skipped rather than trusted.
+    var commands = draw.iterate(list.commands()[0 .. list.length - 3]);
+    var count: usize = 0;
+
+    while (commands.next()) |_| count += 1;
+    try std.testing.expectEqual(2, count);
+
+    @memset(bytes[4..8], 0xff);
+    commands = draw.iterate(list.commands());
+    try std.testing.expectEqual(null, commands.next());
+
+}
+
+test "UTF-8 text decodes leniently, keeps the caret on whole characters, and draws accented letters" {
+
+    const face = font.sans();
+    var characters = font.decode("a\u{e9}\xff");
+
+    try std.testing.expectEqual('a', characters.next().?);
+    try std.testing.expectEqual(0xe9, characters.next().?);
+    try std.testing.expectEqual(0xfffd, characters.next().?);
+    try std.testing.expectEqual(null, characters.next());
+
+    // Accented letters are composites of a base letter and a mark, so they ink more than the plain letter.
+    const plain = face.render(face.lookup('e'), 40 / face.units, 0).?;
+    var ink: f32 = 0;
+
+    for (plain.coverage) |cell| ink += cell;
+
+    const accented = face.render(face.lookup(0xe9), 40 / face.units, 0).?;
+    var accented_ink: f32 = 0;
+
+    for (accented.coverage) |cell| accented_ink += cell;
+    try std.testing.expect(accented_ink > ink * 1.05);
+
+    var bytes = "\u{e9}\u{e9}\n\u{e9}\u{e9}".*;
+    var edit = text.Text{
+
+        .buffer = &bytes,
+        .length = bytes.len,
+        .caret = 2,
+
+    };
+
+    try std.testing.expect(edit.vertical(face, 20, 1000, 1));
+    try std.testing.expectEqual(7, edit.caret);
 
 }

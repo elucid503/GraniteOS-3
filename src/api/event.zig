@@ -10,10 +10,10 @@ pub const Event = packed struct(u64) {
     /// Key events: a `Key`. Button events: the button index. Motion and pointer events: held buttons.
     code: u8 = 0,
 
-    /// The typed character of a key event, or zero.
+    /// The typed character of a key event as a Unicode code point, or zero.
     char: u16 = 0,
 
-    /// Motion events carry a relative delta; pointer and button events a position in surface coordinates.
+    /// Motion events carry a relative delta; pointer and button events a position in surface coordinates; resize events the screen size.
     x: i16 = 0,
     y: i16 = 0,
 
@@ -24,6 +24,12 @@ pub const Event = packed struct(u64) {
         motion,
         pointer,
         button,
+
+        /// The window manager's close control was clicked.
+        close,
+
+        /// The screen changed size; `x` and `y` carry its new width and height.
+        resize,
         _,
 
     };

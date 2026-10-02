@@ -14,7 +14,49 @@ pub const Area = extern struct {
 
 };
 
-/// The display service from a client's side: screen size, surfaces, damage, and input events.
+/// Where a surface stacks; the window manager decorates and lets users move `window` surfaces.
+pub const Layer = enum(u8) {
+
+    background,
+    window,
+    overlay,
+    _,
+
+};
+
+/// How a surface asks to be shown: `area` is its content in screen coordinates.
+pub const Spec = extern struct {
+
+    area: Area = .{},
+    layer: Layer = .window,
+    length: u8 = 0,
+    title: [32]u8 = undefined,
+
+    pub fn init(area: Area, layer: Layer, title: []const u8) Spec {
+
+        var spec = Spec{
+
+            .area = area,
+            .layer = layer,
+            .length = @intCast(@min(title.len, 32)),
+
+        };
+
+        @memcpy(spec.title[0..spec.length], title[0..spec.length]);
+
+        return spec;
+
+    }
+
+    pub fn name(self: *const Spec) []const u8 {
+
+        return self.title[0..@min(self.length, self.title.len)];
+
+    }
+
+};
+
+/// The display service from a client's side: screen size, surfaces, their drawing, and input events.
 pub const Display = struct {
 
     endpoint: u64 = 0,
@@ -32,8 +74,8 @@ pub const Display = struct {
 
     }
 
-    /// Shows the shared memory `handle` at `area` on screen; returns the surface id.
-    pub fn surface(self: *Display, handle: u64, area: Area) api.ServiceError!u64 {
+    /// Shows the shared memory `handle` as `spec` describes; returns the surface id.
+    pub fn surface(self: *Display, handle: u64, spec: Spec) api.ServiceError!u64 {
 
         const endpoint = try self.peer();
 
@@ -44,18 +86,34 @@ pub const Display = struct {
 
         };
 
-        var placement = area;
+        var placement = spec;
 
         return self.request(.surface, @intCast(handle), std.mem.asBytes(&placement));
 
     }
 
-    /// Asks the display to show `area` (surface coordinates) of surface `id` again.
-    pub fn damage(self: *Display, id: u64, area: Area) api.ServiceError!void {
+    /// Moves, resizes, restacks, or retitles surface `id`.
+    pub fn place(self: *Display, id: u64, spec: Spec) api.ServiceError!void {
 
-        var changed = area;
+        var placement = spec;
 
-        _ = try self.request(.damage, @intCast(id), std.mem.asBytes(&changed));
+        _ = try self.request(.place, @intCast(id), std.mem.asBytes(&placement));
+
+    }
+
+    /// Switches the screen to `width` by `height` and remembers it; administrators only.
+    pub fn mode(self: *Display, width: u16, height: u16) api.ServiceError!void {
+
+        _ = try self.request(.mode, @as(u56, height) << 16 | width, &.{});
+
+    }
+
+    /// Shows the first `length` bytes of commands in buffer half `half` of surface `id`.
+    pub fn present(self: *Display, id: u64, half: u1, length: usize) api.ServiceError!void {
+
+        if (id > 0xff or length > 0xffff_ffff) return error.Invalid;
+
+        _ = try self.request(.present, @intCast(id | @as(u64, half) << 8 | @as(u64, length) << 9), &.{});
 
     }
 

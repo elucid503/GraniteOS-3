@@ -6,10 +6,6 @@ const gui = @import("gui");
 const theme = gui.theme;
 pub const panic = api.panic;
 
-const width = 360;
-const row_height = 56;
-const avatar = 36;
-const gap = 6;
 const lock = api.Event.Modifiers{
 
     .shift = true,
@@ -26,55 +22,124 @@ const State = enum {
 
 };
 
-var surface: gui.Surface = undefined;
+const avatar = gui.Style{
+
+    .width = 36,
+    .height = 36,
+
+    .background = theme.field,
+    .radius = 18,
+    .text_align = .center,
+
+    .selected = .{
+
+        .background = theme.accent,
+
+    },
+
+};
+
+var window: gui.Window = undefined;
 var accounts = api.Accounts{};
 var state = State.choose;
-var shown = gui.Rect{};
 
 var names: [8][32]u8 = undefined;
 var lengths: [8]usize = undefined;
+var initials: [8]u8 = undefined;
 var count: usize = 0;
 var selected: usize = 0;
 
-var name = gui.Field{};
-var password = gui.Field{
+var name_bytes: [64]u8 = undefined;
+var name_text = gui.Text{
 
+    .buffer = &name_bytes,
+    .placeholder = "Administrator name",
+
+};
+var password_bytes: [64]u8 = undefined;
+var password_text = gui.Text{
+
+    .buffer = &password_bytes,
+    .placeholder = "Password",
     .secret = true,
 
 };
-var typing_name = false;
-var failed = false;
+
+var name = gui.input(&name_text);
+var password = gui.input(&password_text);
+
+var avatars: [8]gui.Node = undefined;
+var labels: [8]gui.Node = undefined;
+var rows: [8]gui.Node = undefined;
+var parts: [8][2]*gui.Node = undefined;
+var list: [8]*gui.Node = undefined;
+
+var users = gui.box(.{
+
+    .gap = 6,
+
+}, &list);
+var column = gui.box(.{
+
+    .width = 360,
+    .gap = 2 * theme.spacing,
+
+}, &.{ &name, &users, &password });
+var greeter = gui.box(.{
+
+    .justify = .center,
+    .items = .center,
+
+}, &.{&column});
+
+var who = gui.label("", .{
+
+    .grow = 1,
+
+});
+var notes_button = gui.button("Notes", &openNotes);
+var lock_button = gui.button("Lock", &lockScreen);
+var logout_button = gui.button("Log out", &logout);
+var bar = gui.box(theme.bar, &.{ &notes_button, &who, &lock_button, &logout_button });
+var desktop = gui.box(.{
+
+}, &.{&bar});
 
 pub export fn app_main(_: usize, _: usize, environment: *const api.abi.Environment) callconv(.c) noreturn {
 
     api.start(environment, .application);
 
-    const screen = while (true) {
+    for (&rows, 0..) |*row, index| {
 
-        break gui.screen() catch {
+        avatars[index] = gui.label("", avatar);
+        labels[index] = gui.label("", .{
 
-            api.sleep(100);
-            continue;
+            .grow = 1,
 
-        };
+        });
+        parts[index] = .{ &avatars[index], &labels[index] };
+        row.* = gui.box(theme.item, &parts[index]);
+        row.data = index;
+        list[index] = row;
 
-    };
+    }
 
-    surface = gui.Surface.open(screen) catch api.exit(3);
-    surface.canvas.fill(surface.canvas.bounds(), theme.background);
+    name.action = &advance;
+    password.action = &submit;
+
+    window = gui.Window.open(&greeter, .{
+
+        .layer = .overlay,
+
+    }) catch api.exit(3);
     load();
-    refresh();
+    sync();
 
     while (true) {
 
-        const event = surface.next(500) catch {
+        const event = window.next(500) orelse continue;
 
-            api.sleep(50);
-            continue;
-
-        } orelse continue;
-
-        if (react(event)) refresh();
+        react(event);
 
     }
 
@@ -102,125 +167,110 @@ fn load() void {
 
     selected = @min(selected, count -| 1);
     state = if (count == 0) .setup else .choose;
-    typing_name = state == .setup;
-    failed = false;
+    name.invalid = false;
+    password.invalid = false;
 
 }
 
-fn react(event: api.Event) bool {
+/// Shows the tree for the current state.
+fn sync() void {
 
-    if (state == .session) {
+    name.hidden = state != .setup;
+    users.hidden = state == .setup;
 
-        if (event.chord(lock, 'l')) state = .locked else if (event.chord(lock, 'q')) logout() else return false;
-        return true;
+    for (&rows, 0..) |*row, index| {
+
+        row.hidden = index >= count or (state == .locked and index != selected);
+        row.selected = index == selected;
+        row.action = if (state == .choose) &pick else null;
+        avatars[index].selected = row.selected;
+
+        if (index < count) {
+
+            labels[index].content.label = names[index][0..lengths[index]];
+            initials[index] = std.ascii.toUpper(names[index][0]);
+            avatars[index].content.label = initials[index .. index + 1];
+
+        }
 
     }
 
-    if (event.kind == .button and event.pressed and event.code == 0) return click(.{
+    if (count != 0) who.content.label = names[selected][0..lengths[selected]];
 
-        .x = event.x,
-        .y = event.y,
+    window.show(if (state == .session) &desktop else &greeter);
+    window.focus(if (state == .session) null else if (state == .setup and name_text.length == 0) &name else &password);
+    window.stack(if (state == .session) .background else .overlay);
 
-    });
+}
 
-    if (event.kind != .key or !event.pressed) return false;
+fn react(event: api.Event) void {
+
+    if (state == .session) {
+
+        if (event.chord(lock, 'l')) lockScreen(&bar) else if (event.chord(lock, 'q')) logout(&bar);
+        return;
+
+    }
+
+    if (state != .choose or event.kind != .key or !event.pressed) return;
 
     switch (event.key()) {
 
-        .enter => {
-
-            if (state == .setup and typing_name) typing_name = false else submit();
-            return true;
-
-        },
-        .tab => {
-
-            if (state == .setup) typing_name = !typing_name else pick((selected + 1) % count);
-            return true;
-
-        },
-        .up => if (state == .choose and selected > 0) {
-
-            pick(selected - 1);
-            return true;
-
-        },
-        .down => if (state == .choose and selected + 1 < count) {
-
-            pick(selected + 1);
-            return true;
-
-        },
+        .up => if (selected > 0) select(selected - 1),
+        .down => if (selected + 1 < count) select(selected + 1),
         else => {
 
         },
 
     }
 
-    const field = if (typing_name) &name else &password;
-    if (!field.key(event)) return false;
+}
 
-    failed = false;
+fn pick(row: *gui.Node) void {
 
-    return true;
+    select(row.data);
 
 }
 
-fn click(at: gui.Point) bool {
+fn select(index: usize) void {
 
-    if (state == .setup) {
-
-        if (fieldArea(0).contains(at)) typing_name = true else if (fieldArea(1).contains(at)) typing_name = false else return false;
-        return true;
-
-    }
-
-    if (state != .choose) return false;
-
-    for (0..count) |index| {
-
-        if (!rowArea(index).contains(at)) continue;
-
-        pick(index);
-        return true;
-
-    }
-
-    return false;
-
-}
-
-fn pick(index: usize) void {
-
-    if (state != .choose or index == selected) return;
+    if (index == selected) return;
 
     selected = index;
-    password.clear();
-    failed = false;
+    password_text.clear();
+    password.invalid = false;
+    sync();
 
 }
 
-fn submit() void {
+fn advance(_: *gui.Node) void {
 
-    defer password.clear();
+    window.focus(&password);
+
+}
+
+fn submit(_: *gui.Node) void {
+
+    defer sync();
+    defer password_text.clear();
 
     if (state == .setup) {
 
-        accounts.create(name.text(), password.text(), true) catch {
+        accounts.create(name_text.text(), password_text.text(), true) catch {
 
-            failed = true;
+            name.invalid = true;
             return;
 
         };
 
     }
 
-    const user = if (state == .setup) name.text() else names[selected][0..lengths[selected]];
+    const user = if (state == .setup) name_text.text() else names[selected][0..lengths[selected]];
 
-    _ = accounts.login(user, password.text()) catch {
+    _ = accounts.login(user, password_text.text()) catch {
 
-        failed = true;
         if (state == .setup) load();
+        password.invalid = true;
 
         return;
 
@@ -236,7 +286,7 @@ fn submit() void {
 
         }
 
-        name.clear();
+        name_text.clear();
 
     }
 
@@ -244,136 +294,30 @@ fn submit() void {
 
 }
 
-fn logout() void {
+fn lockScreen(_: *gui.Node) void {
 
+    state = .locked;
+    sync();
+
+}
+
+fn openNotes(_: *gui.Node) void {
+
+    api.launch("notes") catch {
+
+    };
+
+}
+
+fn logout(_: *gui.Node) void {
+
+    api.end() catch {
+
+    };
     accounts.logout() catch {
 
     };
     load();
-
-}
-
-/// Repaints the content and shows the area it covers now or covered before.
-fn refresh() void {
-
-    const now = content();
-    const dirty = shown.join(now);
-    const target = &surface.canvas;
-
-    target.fill(dirty, theme.background);
-
-    switch (state) {
-
-        .setup => {
-
-            name.draw(target, fieldArea(0), "Administrator name", typing_name, failed);
-            password.draw(target, fieldArea(1), "Password", !typing_name, false);
-
-        },
-        .choose => {
-
-            for (0..count) |index| row(index, rowArea(index), index == selected);
-            password.draw(target, fieldArea(0), "Password", true, failed);
-
-        },
-        .locked => {
-
-            row(selected, rowArea(0), true);
-            password.draw(target, fieldArea(0), "Password", true, failed);
-
-        },
-        .session => {
-
-        },
-
-    }
-
-    shown = now;
-    surface.damage(dirty) catch {
-
-    };
-
-}
-
-fn row(index: usize, area: gui.Rect, active: bool) void {
-
-    const target = &surface.canvas;
-    const face = gui.sans();
-    const user = names[index][0..lengths[index]];
-    const circle = gui.Rect{
-
-        .x = area.x + 10,
-        .y = area.y + @divTrunc(area.height - avatar, 2),
-        .width = avatar,
-        .height = avatar,
-
-    };
-
-    if (active) target.round(area, theme.radius, theme.selected);
-    target.round(circle, avatar / 2, if (active) theme.accent else theme.field);
-    target.label(face, &.{std.ascii.toUpper(user[0])}, theme.body, circle, theme.text, .center);
-    target.label(face, user, theme.body, .{
-
-        .x = circle.right() + 14,
-        .y = area.y,
-        .width = area.right() - circle.right() - 14,
-        .height = area.height,
-
-    }, theme.text, .left);
-
-}
-
-/// The centred column holding the current state's controls.
-fn content() gui.Rect {
-
-    const rows: i32 = switch (state) {
-
-        .choose => @intCast(count),
-        .locked => 1,
-        else => 0,
-
-    };
-
-    const height = switch (state) {
-
-        .setup => 2 * theme.control + theme.spacing,
-        .choose, .locked => rows * row_height + (rows - 1) * gap + 2 * theme.spacing + theme.control,
-        .session => 0,
-
-    };
-
-    return surface.canvas.bounds().centered(width, height);
-
-}
-
-fn rowArea(index: usize) gui.Rect {
-
-    const column = content();
-
-    return .{
-
-        .x = column.x,
-        .y = column.y + @as(i32, @intCast(index)) * (row_height + gap),
-        .width = width,
-        .height = row_height,
-
-    };
-
-}
-
-/// Field `index` counted from the top in setup, or the password field otherwise.
-fn fieldArea(index: i32) gui.Rect {
-
-    const column = content();
-    const top = if (state == .setup) column.y + index * (theme.control + theme.spacing) else column.bottom() - theme.control;
-
-    return .{
-
-        .x = column.x,
-        .y = top,
-        .width = width,
-        .height = theme.control,
-
-    };
+    sync();
 
 }

@@ -13,11 +13,10 @@ test "GPU quads cover exactly their pixels and sample texel centres under either
     for ([_]f32{ 0.5, 0 }) |shift| {
 
         // A four-by-two area at (3, 5) of a 16 by 8 frame, where pixel n's centre lies at n + 0.5 - shift.
-        const corners = gpu.place(3, 5, 4, 2, 16, 8, shift);
-        const left = (corners[0] + 1) * 8;
-        const right = (corners[4] + 1) * 8;
-        const top = (1 - corners[1]) * 4;
-        const bottom = (1 - corners[9]) * 4;
+        const left = (gpu.edge(3, 16, shift) + 1) * 8;
+        const right = (gpu.edge(7, 16, shift) + 1) * 8;
+        const top = (gpu.edge(5, 8, shift) + 1) * 4;
+        const bottom = (gpu.edge(7, 8, shift) + 1) * 4;
 
         try std.testing.expectApproxEqAbs(0.125, (3.5 - shift - left) / (right - left), 1e-5);
         try std.testing.expectApproxEqAbs(0.875, (6.5 - shift - left) / (right - left), 1e-5);
@@ -25,6 +24,10 @@ test "GPU quads cover exactly their pixels and sample texel centres under either
         try std.testing.expect(2.5 - shift < left and 7.5 - shift > right);
 
     }
+
+    // Texture coordinates run from a slot's near edge, or its far edge when mirrored.
+    try std.testing.expectEqual(10.0 / 1024.0, gpu.texel(8, 6, 2, false));
+    try std.testing.expectEqual(12.0 / 1024.0, gpu.texel(8, 6, 2, true));
 
 }
 

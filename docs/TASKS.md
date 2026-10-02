@@ -34,16 +34,20 @@
 - [x] File and volume sizes without arbitrary fixed limits.
 - [x] Multiple accounts, login, and administrator privileges.
 - [x] Private home directories and access permissions.
-- [x] Logout and screen locking (terminal; graphical locking comes with the desktop).
+- [x] Logout and screen locking (terminal and graphical).
 - [x] Installed boot alongside an existing OS, preserving its data.
 - [x] Shutdown and reboot.
 
 ## Milestone 5: Graphics and Desktop
 
-- [ ] USB and VMware keyboard/mouse support.
-- [ ] Intel UHD 630 and VMware display support.
-- [ ] GPU-accelerated rendering wherever supported.
-- [ ] Graphical login, desktop, and window management.
+- [x] VMware keyboard/mouse support.
+- [ ] USB keyboard/mouse support.
+- [x] VMware display support.
+- [ ] Intel UHD 630 display support.
+- [ ] GPU-accelerated rendering wherever supported (VMware done; Intel pending).
+- [x] Graphical login and screen locking.
+- [x] Window management and a shared widget toolkit.
+- [ ] Desktop shell and application launching.
 - [ ] Desktop responsiveness, rendering, and usability improvements over GraniteOS 2.
 - [ ] File manager, editor, image viewer, settings, and system monitoring.
 - [ ] Remaining GraniteOS 2 desktop utilities with independently implemented code.

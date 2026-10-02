@@ -139,6 +139,13 @@ pub const Device = struct {
 
     }
 
+    /// Whether the adapter can show a `width` by `height` mode.
+    pub fn fits(self: *Device, width: u32, height: u32) bool {
+
+        return width <= self.read(max_width) and height <= self.read(max_height) and self.read(vram_size) / 4 / width >= height;
+
+    }
+
     /// Registers `frame` as the memory the device copies from; its pages may lie anywhere in RAM.
     pub fn bind(self: *Device, frame: []align(4096) const u8, pitch: u32) bool {
 

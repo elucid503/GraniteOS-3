@@ -73,6 +73,7 @@ pub const Image = enum(u64) {
     display,
     input,
     login,
+    notes,
 
 };
 

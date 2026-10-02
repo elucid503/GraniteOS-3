@@ -182,7 +182,19 @@ fn invoke(task: *process.Process, ticks: u64, frame: *abi.Request) CallError!voi
 
             if (!task.permits(.manage, 0, 1)) return error.Denied;
             const image = std.enums.fromInt(abi.Image, frame.first) orelse return error.Invalid;
+            const requester = if (frame.third == 0) null else ipc.find(root.processes, frame.third) orelse return error.NoProcess;
+
+            // Only a signed-in application blocked on the caller lends its identity, and only to another application.
+            if (requester) |client| {
+
+                if (client.state != .replying or client.destination != task.id or client.ticket != frame.fourth) return error.Denied;
+                if (client.policy.layer != .application or client.identity.user == abi.nobody.user or client.identity.user == abi.system.user) return error.Denied;
+                if (!service.application(image)) return error.Invalid;
+
+            }
+
             frame.first = try service.spawn(task, image, frame.second);
+            if (requester) |client| ipc.find(root.processes, frame.first).?.identity = client.identity;
 
         },
         .inspect => {

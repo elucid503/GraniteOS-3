@@ -107,6 +107,7 @@ pub const Alignment = enum {
 
     left,
     center,
+    right,
 
 };
 
@@ -125,6 +126,9 @@ pub const Canvas = struct {
     pixels: []u32,
     width: usize,
     height: usize,
+
+    /// Drawing outside this, when set, is discarded.
+    limit: ?Rect = null,
 
     pub fn bounds(self: *const Canvas) Rect {
 
@@ -185,14 +189,16 @@ pub const Canvas = struct {
 
     }
 
-    /// Draws ASCII `string` at `size` pixels with its baseline starting at (`x`, `baseline`).
+    /// Draws UTF-8 `string` at `size` pixels with its baseline starting at (`x`, `baseline`).
     pub fn text(self: *Canvas, face: *const font.Font, string: []const u8, size: f32, x: i32, baseline: i32, color: u32) void {
 
         const scale = size / face.units;
+        const visible = self.region() orelse return;
         var pen: f32 = @floatFromInt(x);
         var previous: u16 = 0;
+        var characters = font.decode(string);
 
-        for (string) |char| {
+        while (characters.next()) |char| {
 
             const glyph = face.lookup(char);
 
@@ -215,7 +221,7 @@ pub const Canvas = struct {
 
                         };
 
-                        if (self.bounds().contains(point)) blend(self.at(point), color, bitmap.coverage[row * bitmap.width + column]);
+                        if (visible.contains(point)) blend(self.at(point), color, bitmap.coverage[row * bitmap.width + column]);
 
                     }
 
@@ -232,17 +238,9 @@ pub const Canvas = struct {
     /// Draws `string` vertically centered in `area`.
     pub fn label(self: *Canvas, face: *const font.Font, string: []const u8, size: f32, area: Rect, color: u32, alignment: Alignment) void {
 
-        const scale = size / face.units;
-        const span: i32 = @intFromFloat(@ceil(face.measure(string, scale)));
-        const height: i32 = @intFromFloat(@as(f32, @floatFromInt(face.ascent + face.descent)) * scale);
-        const x = switch (alignment) {
+        const start = anchor(face, string, size, area, alignment);
 
-            .left => area.x,
-            .center => area.x + @divTrunc(area.width - span, 2),
-
-        };
-
-        self.text(face, string, size, x, area.y + @divTrunc(area.height + height, 2), color);
+        self.text(face, string, size, start.x, start.y, color);
 
     }
 
@@ -279,9 +277,17 @@ pub const Canvas = struct {
 
     }
 
+    fn region(self: *const Canvas) ?Rect {
+
+        const limit = self.limit orelse return self.bounds();
+
+        return limit.intersect(self.bounds());
+
+    }
+
     fn clip(self: *const Canvas, area: Rect) ?Bounds {
 
-        const visible = area.intersect(self.bounds()) orelse return null;
+        const visible = area.intersect(self.region() orelse return null) orelse return null;
 
         return .{
 
@@ -295,6 +301,28 @@ pub const Canvas = struct {
     }
 
 };
+
+/// Where a label's baseline starts so it sits vertically centred in `area`.
+pub fn anchor(face: *const font.Font, string: []const u8, size: f32, area: Rect, alignment: Alignment) Point {
+
+    const scale = size / face.units;
+    const span: i32 = @intFromFloat(@ceil(face.measure(string, scale)));
+    const height: i32 = @intFromFloat(@as(f32, @floatFromInt(face.ascent + face.descent)) * scale);
+
+    return .{
+
+        .x = switch (alignment) {
+
+            .left => area.x,
+            .center => area.x + @divTrunc(area.width - span, 2),
+            .right => area.right() - span,
+
+        },
+        .y = area.y + @divTrunc(area.height + height, 2),
+
+    };
+
+}
 
 fn blend(pixel: *u32, color: u32, alpha: f32) void {
 

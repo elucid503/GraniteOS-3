@@ -1,4 +1,5 @@
 const api = @import("api");
+const gui = @import("gui");
 
 const protocol = api.protocol;
 pub const panic = api.panic;
@@ -118,6 +119,65 @@ fn run() !void {
     try expect(try api.lookup(supervisor, .serial) == replacement_serial);
     try expect(try api.call(shell, protocol.pack(.ping, 0)) == counter + 3);
     try expect(try api.call(stopped_replacement, protocol.pack(.ping, 41)) == 42);
+    try desktop();
+
+}
+
+/// Opens a window through the toolkit and checks the window manager's rules against it.
+fn desktop() !void {
+
+    try refused(api.launch("notes"), error.Denied);
+
+    var bytes: [16]u8 = undefined;
+    var text = gui.Text{
+
+        .buffer = &bytes,
+
+    };
+    var field = gui.input(&text);
+    var button = gui.button("OK", &ignore);
+    var children = [_]*gui.Node{ &field, &button };
+    var root = gui.box(gui.theme.panel, &children);
+    var window = try gui.Window.open(&root, .{
+
+        .title = "Self-test",
+        .width = 200,
+        .height = 120,
+
+    });
+
+    _ = window.next(1);
+    try expect(window.surface.attached);
+
+    const display = &window.surface.display;
+    const id = window.surface.id;
+    var spec = window.surface.spec;
+
+    spec.area.x += 20;
+    try display.place(id, spec);
+
+    var grown = spec;
+    var covering = spec;
+    var none: [0]u8 = .{};
+
+    grown.area.width = 9000;
+    covering.layer = .overlay;
+    try refused(display.place(id, grown), error.Invalid);
+    grown.area.width = spec.area.width + 40;
+    try display.place(id, grown);
+    try refused(display.place(id, covering), error.Invalid);
+    try refused(display.present(id ^ 1, 0, 0), error.Invalid);
+    try expect(try api.exchange(display.endpoint, protocol.pack(.input, 0), &none) == protocol.denied);
+
+}
+
+fn ignore(_: *gui.Node) void {
+
+}
+
+fn refused(result: anytype, expected: anyerror) !void {
+
+    if (result) |_| return error.AcceptanceFailed else |err| try expect(err == expected);
 
 }
 

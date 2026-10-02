@@ -112,7 +112,7 @@ pub fn build(b: *std.Build) void {
 
     const apps = [_][]const u8{
 
-        "shell", "client", "login",
+        "shell", "client", "login", "notes",
 
     };
 

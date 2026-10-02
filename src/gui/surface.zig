@@ -1,63 +1,65 @@
-const std = @import("std");
-
 const canvas = @import("canvas.zig");
+const draw = @import("draw.zig");
 
 const api = @import("api");
 
-/// Client-drawn pixels shown by the display; re-attached automatically if the display restarts.
+/// A window's drawing commands, rendered by the display; re-attached automatically if the display restarts.
 pub const Surface = struct {
 
-    canvas: canvas.Canvas,
-    area: canvas.Rect,
+    /// Records into the half of the buffer the display is not showing.
+    list: draw.List,
+    spec: api.display.Spec,
     memory: api.Shared,
+    half: u1 = 0,
 
     display: api.Display = .{},
     id: u64 = 0,
     attached: bool = false,
 
-    /// Allocates pixels for `area` in screen coordinates; nothing shows until the first `damage`.
-    pub fn open(area: canvas.Rect) !Surface {
+    /// Allocates the command buffer for `spec`; nothing shows until the first `present`.
+    pub fn open(spec: api.display.Spec) !Surface {
 
-        const count: usize = @intCast(area.width * area.height);
-        const memory = try api.share((count * 4 + 4095) / 4096);
+        const memory = try api.share(2 * draw.capacity / 4096);
 
         return .{
 
-            .canvas = .{
+            .list = .{
 
-                .pixels = std.mem.bytesAsSlice(u32, memory.bytes[0 .. count * 4]),
-                .width = @intCast(area.width),
-                .height = @intCast(area.height),
+                .bytes = memory.bytes[0..draw.capacity],
+                .width = spec.area.width,
+                .height = spec.area.height,
 
             },
-            .area = area,
+            .spec = spec,
             .memory = memory,
 
         };
 
     }
 
-    /// Shows `rect` of the canvas again; the first call after (re)attaching shows everything.
-    pub fn damage(self: *Surface, rect: canvas.Rect) !void {
+    /// Shows what the list recorded, then starts a fresh list in the other half.
+    pub fn present(self: *Surface) !void {
 
         for (0..2) |_| {
 
-            const changed = if (self.attached) rect else self.canvas.bounds();
-
             if (!self.attached) {
 
-                self.id = try self.display.surface(self.memory.handle, wire(self.area));
+                self.id = try self.display.surface(self.memory.handle, self.spec);
                 self.attached = true;
 
             }
 
-            self.display.damage(self.id, wire(changed)) catch |err| {
+            self.display.present(self.id, self.half, self.list.length) catch |err| {
 
                 if (err != error.Missing and err != error.Denied) return err;
                 self.attached = false;
                 continue;
 
             };
+
+            self.half +%= 1;
+            self.list.bytes = self.memory.bytes[@as(usize, self.half) * draw.capacity ..][0..draw.capacity];
+            self.list.reset();
 
             return;
 
@@ -67,10 +69,27 @@ pub const Surface = struct {
 
     }
 
+    /// Moves, resizes, restacks, or retitles the surface.
+    pub fn place(self: *Surface, spec: api.display.Spec) !void {
+
+        self.spec = spec;
+        self.list.width = spec.area.width;
+        self.list.height = spec.area.height;
+        if (!self.attached) return;
+
+        self.display.place(self.id, spec) catch |err| {
+
+            if (err != error.Missing and err != error.Denied) return err;
+            self.attached = false;
+
+        };
+
+    }
+
     /// Waits up to `timeout` ticks for input; null when none arrived.
     pub fn next(self: *Surface, timeout: u64) !?api.Event {
 
-        if (!self.attached) try self.damage(self.canvas.bounds());
+        if (!self.attached) return error.Missing;
 
         return self.display.wait(self.id, timeout) catch |err| {
 
@@ -95,19 +114,6 @@ pub fn screen() !canvas.Rect {
 
         .width = size.width,
         .height = size.height,
-
-    };
-
-}
-
-fn wire(rect: canvas.Rect) api.display.Area {
-
-    return .{
-
-        .x = rect.x,
-        .y = rect.y,
-        .width = rect.width,
-        .height = rect.height,
 
     };
 

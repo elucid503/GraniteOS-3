@@ -31,6 +31,17 @@ const Vector = struct {
 
 var area: [160 * 160]f32 = undefined;
 var points: [512]Point = undefined;
+
+/// The last point of each contour loaded so far.
+var stops: [64]usize = undefined;
+
+/// How much of `points` and `stops` a glyph being loaded has filled.
+const Shape = struct {
+
+    points: usize = 0,
+    contours: usize = 0,
+
+};
 var embedded: ?Font = null;
 
 /// Nimbus Sans, a metric-compatible Helvetica; the embedded file is known to parse.
@@ -161,13 +172,14 @@ pub const Font = struct {
 
     }
 
-    /// Width of ASCII `string` in pixels at `scale` pixels per unit.
+    /// Width of UTF-8 `string` in pixels at `scale` pixels per unit.
     pub fn measure(self: *const Font, string: []const u8, scale: f32) f32 {
 
         var total: f32 = 0;
         var previous: u16 = 0;
+        var characters = decode(string);
 
-        for (string) |char| {
+        while (characters.next()) |char| {
 
             const glyph = self.lookup(char);
 
@@ -183,55 +195,10 @@ pub const Font = struct {
     /// Rasterizes `glyph` at `scale` pixels per unit, shifted right by `shift` pixels; null when it draws nothing.
     pub fn render(self: *const Font, glyph: u16, scale: f32, shift: f32) ?Bitmap {
 
-        const start = self.location(glyph);
-        const end = self.location(@as(usize, glyph) + 1);
+        const data = self.outline(glyph) orelse return null;
+        var shape = Shape{};
 
-        if (end <= start) return null;
-
-        const data = self.bytes[self.glyf + start .. self.glyf + end];
-        const contours = read(i16, data, 0);
-
-        // ponytail: composite glyphs (accented letters) draw nothing; add when non-ASCII text matters.
-        if (contours <= 0) return null;
-
-        const count = @as(usize, read(u16, data, 10 + @as(usize, @intCast(contours - 1)) * 2)) + 1;
-        if (count > points.len) return null;
-
-        var offset = 12 + @as(usize, @intCast(contours)) * 2;
-        offset += read(u16, data, offset - 2);
-
-        var index: usize = 0;
-
-        while (index < count) {
-
-            const flag = data[offset];
-            var repeat: usize = 1;
-
-            offset += 1;
-            if (flag & 8 != 0) {
-
-                repeat += data[offset];
-                offset += 1;
-
-            }
-
-            for (0..@min(repeat, count - index)) |_| {
-
-                points[index] = .{
-
-                    .x = 0,
-                    .y = 0,
-                    .flag = flag,
-
-                };
-                index += 1;
-
-            }
-
-        }
-
-        offset = coordinates(data, offset, count, .x, 2, 16);
-        _ = coordinates(data, offset, count, .y, 4, 32);
+        if (!self.load(glyph, 0, 0, 0, &shape) or shape.contours == 0) return null;
 
         // A one-pixel margin keeps rounding from reaching outside the buffer.
         const left = @floor(@as(f32, @floatFromInt(read(i16, data, 2))) * scale + shift) - 1;
@@ -253,10 +220,7 @@ pub const Font = struct {
 
         var first: usize = 0;
 
-        for (0..@intCast(contours)) |contour| {
-
-            const last = read(u16, data, 10 + contour * 2);
-            if (last < first or last >= count) return null;
+        for (stops[0..shape.contours]) |last| {
 
             raster.outline(points[first .. last + 1], scale, shift - left, -top);
             first = last + 1;
@@ -282,6 +246,141 @@ pub const Font = struct {
             .coverage = raster.area[0 .. width * height],
 
         };
+
+    }
+
+    /// The `glyf` entry of `glyph`, or null when it has no outline.
+    fn outline(self: *const Font, glyph: u16) ?[]const u8 {
+
+        const start = self.location(glyph);
+        const end = self.location(@as(usize, glyph) + 1);
+
+        if (end <= start) return null;
+
+        return self.bytes[self.glyf + start .. self.glyf + end];
+
+    }
+
+    /// Appends the contours of `glyph`, moved by (`dx`, `dy`) font units, to `points` and `stops`; false when they do not fit.
+    fn load(self: *const Font, glyph: u16, dx: i32, dy: i32, depth: u8, shape: *Shape) bool {
+
+        const data = self.outline(glyph) orelse return true;
+        const contours = read(i16, data, 0);
+
+        if (contours < 0) return depth < 4 and self.components(data, dx, dy, depth, shape);
+        if (contours == 0) return true;
+
+        const total: usize = @intCast(contours);
+        const count = @as(usize, read(u16, data, 10 + (total - 1) * 2)) + 1;
+        const base = shape.points;
+
+        if (base + count > points.len or shape.contours + total > stops.len) return false;
+
+        const list = points[base..][0..count];
+        var offset = 12 + total * 2;
+        offset += read(u16, data, offset - 2);
+
+        var index: usize = 0;
+
+        while (index < count) {
+
+            const flag = data[offset];
+            var repeat: usize = 1;
+
+            offset += 1;
+            if (flag & 8 != 0) {
+
+                repeat += data[offset];
+                offset += 1;
+
+            }
+
+            for (0..@min(repeat, count - index)) |_| {
+
+                list[index] = .{
+
+                    .x = 0,
+                    .y = 0,
+                    .flag = flag,
+
+                };
+                index += 1;
+
+            }
+
+        }
+
+        offset = coordinates(data, offset, list, .x, 2, 16);
+        _ = coordinates(data, offset, list, .y, 4, 32);
+
+        for (list) |*point| {
+
+            point.x += dx;
+            point.y += dy;
+
+        }
+
+        var first: usize = 0;
+
+        for (0..total) |contour| {
+
+            const last = read(u16, data, 10 + contour * 2);
+            if (last < first or last >= count) return false;
+
+            stops[shape.contours] = base + last;
+            shape.contours += 1;
+            first = last + 1;
+
+        }
+
+        shape.points = base + count;
+
+        return true;
+
+    }
+
+    /// Loads each part of a composite glyph, such as a letter and its accent.
+    fn components(self: *const Font, data: []const u8, dx: i32, dy: i32, depth: u8, shape: *Shape) bool {
+
+        var offset: usize = 10;
+
+        while (true) {
+
+            const flags = read(u16, data, offset);
+            const part = read(u16, data, offset + 2);
+            var x: i32 = 0;
+            var y: i32 = 0;
+
+            offset += 4;
+
+            if (flags & 1 != 0) {
+
+                x = read(i16, data, offset);
+                y = read(i16, data, offset + 2);
+                offset += 4;
+
+            } else {
+
+                x = @as(i8, @bitCast(data[offset]));
+                y = @as(i8, @bitCast(data[offset + 1]));
+                offset += 2;
+
+            }
+
+            // ponytail: parts placed by matching points, or scaled, draw unmoved and unscaled; Latin accents use plain offsets.
+            if (flags & 2 == 0) {
+
+                x = 0;
+                y = 0;
+
+            }
+
+            offset += if (flags & 8 != 0) 2 else if (flags & 0x40 != 0) 4 else if (flags & 0x80 != 0) @as(usize, 8) else 0;
+
+            if (!self.load(part, dx + x, dy + y, depth + 1, shape)) return false;
+            if (flags & 0x20 == 0) return true;
+
+        }
 
     }
 
@@ -438,12 +537,12 @@ const Raster = struct {
 
 };
 
-fn coordinates(data: []const u8, start: usize, count: usize, comptime axis: enum { x, y }, short: u8, same: u8) usize {
+fn coordinates(data: []const u8, start: usize, list: []Point, comptime axis: enum { x, y }, short: u8, same: u8) usize {
 
     var offset = start;
     var value: i32 = 0;
 
-    for (points[0..count]) |*point| {
+    for (list) |*point| {
 
         if (point.flag & short != 0) {
 
@@ -464,6 +563,38 @@ fn coordinates(data: []const u8, start: usize, count: usize, comptime axis: enum
     }
 
     return offset;
+
+}
+
+/// Reads UTF-8 one code point at a time; each malformed byte reads as U+FFFD.
+pub const Characters = struct {
+
+    bytes: []const u8,
+    index: usize = 0,
+
+    pub fn next(self: *Characters) ?u21 {
+
+        if (self.index >= self.bytes.len) return null;
+
+        const rest = self.bytes[self.index..];
+        const length = std.unicode.utf8ByteSequenceLength(rest[0]) catch 0;
+        const char = if (length != 0 and length <= rest.len) std.unicode.utf8Decode(rest[0..length]) catch null else null;
+
+        self.index += if (char != null) length else 1;
+
+        return char orelse 0xfffd;
+
+    }
+
+};
+
+pub fn decode(bytes: []const u8) Characters {
+
+    return .{
+
+        .bytes = bytes,
+
+    };
 
 }
 

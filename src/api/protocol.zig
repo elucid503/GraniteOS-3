@@ -34,9 +34,13 @@ pub const Operation = enum(u8) {
     install,
     power,
     surface,
-    damage,
+    present,
     wait,
     input,
+    place,
+    launch,
+    end,
+    mode,
     _,
 
 };

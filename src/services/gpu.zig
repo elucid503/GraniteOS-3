@@ -14,9 +14,7 @@ const set_viewport = 1055;
 const clear = 1057;
 const set_shader = 1061;
 const draw = 1063;
-const destroy_object = 1094;
 const define_surface = 1097;
-const destroy_surface = 1098;
 const bind_surface = 1099;
 const update_image = 1101;
 const readback_image = 1103;
@@ -32,6 +30,7 @@ const define_object = 1135;
 
 // Surface formats and flags.
 const x8r8g8b8 = 1;
+const a8r8g8b8 = 2;
 const buffer = 37;
 const vertex_hint = 1 << 4;
 const texture_hint = 1 << 5;
@@ -47,12 +46,16 @@ const color0 = 2;
 const clear_color = 1;
 const vertex_shader = 1;
 const pixel_shader = 2;
-const float2 = 1;
-const position = 0;
-const texcoord = 5;
 const triangle_list = 1;
 const no_id = 0xffffffff;
 const primary = 1;
+
+// Vertex element types and usages.
+const float2 = 1;
+const packed_color = 4;
+const position = 0;
+const texcoord = 5;
+const vertex_color = 10;
 
 // Render states and their values.
 const z_enable = 1;
@@ -63,9 +66,15 @@ const fog = 6;
 const stencil = 8;
 const lighting = 9;
 const shade_mode = 30;
-const smooth = 2;
+const source_blend = 32;
+const target_blend = 33;
+const blend_equation = 34;
 const cull_mode = 35;
+const smooth = 2;
 const cull_none = 1;
+const one = 2;
+const inverse_source_alpha = 6;
+const add = 1;
 
 // Texture states and their values.
 const bind_texture = 1;
@@ -77,58 +86,130 @@ const min_filter = 12;
 const clamp = 3;
 const nearest = 1;
 
-// vs_2_0: dcl_position v0; dcl_texcoord v1; mov oPos, v0; mov oT0.xy, v1
-const passthrough = [_]u32{ 0xfffe0200, 0x0200001f, 0x80000000, 0x900f0000, 0x0200001f, 0x80000005, 0x900f0001, 0x02000001, 0xc00f0000, 0x90e40000, 0x02000001, 0xe0030000, 0x90e40001, 0x0000ffff };
+// vs_2_0: dcl_position v0; dcl_texcoord v1; dcl_color v2; mov oPos, v0; mov oT0.xy, v1; mov oD0, v2
+const passthrough = [_]u32{
 
-// ps_2_0: dcl t0.xy; dcl_2d s0; texld r0, t0, s0; mov oC0, r0
-const sample = [_]u32{ 0xffff0200, 0x0200001f, 0x80000000, 0xb0030000, 0x0200001f, 0x90000000, 0xa00f0800, 0x03000042, 0x800f0000, 0xb0e40000, 0xa0e40800, 0x02000001, 0x800f0800, 0x80e40000, 0x0000ffff };
+    0xfffe0200,
+    0x0200001f, 0x80000000, 0x900f0000,
+    0x0200001f, 0x80000005, 0x900f0001,
+    0x0200001f, 0x8000000a, 0x900f0002,
+    0x02000001, 0xc00f0000, 0x90e40000,
+    0x02000001, 0xe0030000, 0x90e40001,
+    0x02000001, 0xd00f0000, 0x90e40002,
+    0x0000ffff,
+
+};
+
+// ps_2_0: dcl t0.xy; dcl v0; dcl_2d s0; texld r0, t0, s0; mul r0, r0, v0; mov oC0, r0
+const tint = [_]u32{
+
+    0xffff0200,
+    0x0200001f, 0x80000000, 0xb0030000,
+    0x0200001f, 0x80000000, 0x900f0000,
+    0x0200001f, 0x90000000, 0xa00f0800,
+    0x03000042, 0x800f0000, 0xb0e40000, 0xa0e40800,
+    0x03000005, 0x800f0000, 0x80e40000, 0x90e40000,
+    0x02000001, 0x800f0800, 0x80e40000,
+    0x0000ffff,
+
+};
 
 // Object ids; every surface keeps its pixels in the memory object of the same id.
 const frame = 0;
 const vertices = 1;
-const probe = 2;
+const atlas = 2;
 const result = 3;
 const code = 4;
 const state = 5;
-const textures = 6;
+const objects = 6;
 
 // One page holds each object table: memory objects, surfaces, contexts, shaders, and screen targets.
 const tables = 5;
 
 const context = 0;
-const quad_bytes = 6 * 4 * @sizeOf(f32);
 
 // A legacy context saves 16 KiB of state.
 const state_pages = 4;
 
-/// Most surfaces one frame can draw.
-pub const layers = 16;
+/// Side of the square texture caching glyphs and corner masks; one row fills one page.
+const atlas_size = 1024;
 
-/// A client surface as it sits on screen.
-pub const Layer = struct {
+// The top-left texels: a solid block that plain fills sample, then one half-covered texel for the self-test.
+const solid = 4;
+const half = solid;
 
-    index: u32,
-    area: gui.Rect,
+const vertex_pages = 512;
+const quad_bytes = 6 * @sizeOf(Vertex);
+const quads = vertex_pages * 4096 / quad_bytes;
+
+// Larger corners than this draw square; no window rounds them that much.
+const largest_corner = 64;
+
+const Vertex = extern struct {
+
+    x: f32,
+    y: f32,
+    u: f32,
+    v: f32,
+
+    /// 0xAARRGGBB, which the device hands the shader as red, green, blue, alpha.
+    color: u32,
 
 };
 
-/// Composes client surfaces on the SVGA3D device: each is a texture, drawn as a quad into a frame a screen target shows.
+/// Where a glyph or corner mask sits in the atlas; an empty slot draws nothing.
+const Slot = struct {
+
+    key: u64 = 0,
+    x: u32 = 0,
+    y: u32 = 0,
+    width: u32 = 0,
+    height: u32 = 0,
+    left: i32 = 0,
+    top: i32 = 0,
+
+};
+
+const Kind = enum(u2) {
+
+    corner,
+    glyph,
+
+};
+
+// The shape cache and page tables, kept outside `Gpu` so passing one around copies little on a small stack.
+var slots = [_]Slot{.{}} ** 2048;
+var maps = [_]Paging{.{}} ** objects;
+
+/// Draws everything on the SVGA3D device: each command becomes textured quads, tinted and blended in one shader.
 pub const Gpu = struct {
 
     device: *svga.Device,
     width: u32,
     height: u32,
 
-    /// CPU views of the vertex staging page, the self-test texture, and what the self-test reads back.
-    staging: api.Page,
-    texels: api.Page,
+    /// Contiguous views of what the device reads, and the page it writes the self-test back to.
+    vertices: api.Shared,
+    atlas: api.Shared,
     readback: api.Page,
-
-    /// Page tables per memory object, kept so a later surface in the same slot reuses them.
-    paging: [textures + layers]Paging = [_]Paging{.{}} ** (textures + layers),
 
     /// How far pixel centres sit from each pixel's top-left corner; the self-test settles it.
     shift: f32 = 0.5,
+
+    /// The target quads land on, in pixels.
+    columns: u32 = 0,
+    rows: u32 = 0,
+
+    /// Quads staged since the last draw, and whether the device may still be reading staged ones.
+    count: usize = 0,
+    busy: bool = false,
+
+    filled: usize = 0,
+
+    /// The atlas shelf being filled, and atlas texels written but not yet uploaded.
+    cursor: gui.Point = .{},
+    shelf: u32 = 0,
+    dirty: gui.Rect = .{},
 
     /// Draws into a `width` by `height` frame and shows it; null, leaving the screen alone, unless a test pattern draws exactly.
     pub fn init(device: *svga.Device, width: u32, height: u32) ?Gpu {
@@ -156,8 +237,8 @@ pub const Gpu = struct {
             .width = width,
             .height = height,
 
-            .staging = undefined,
-            .texels = undefined,
+            .vertices = try api.share(vertex_pages),
+            .atlas = try api.share(atlas_size * atlas_size * 4 / 4096),
             .readback = undefined,
 
         };
@@ -165,30 +246,30 @@ pub const Gpu = struct {
         // The device may write context state and rendered frames back at any time, so those pages outlive us.
         _ = try gpu.reserve(state, state_pages);
         _ = try gpu.reserve(frame, (width * height * 4 + 4095) / 4096);
+        gpu.readback = try gpu.reserve(result, 1);
 
         const program = try gpu.reserve(code, 1);
 
-        gpu.staging = try gpu.reserve(vertices, 1);
-        gpu.texels = try gpu.reserve(probe, 1);
-        gpu.readback = try gpu.reserve(result, 1);
+        try gpu.lend(vertices, gpu.vertices);
+        try gpu.lend(atlas, gpu.atlas);
 
         @memcpy(program.bytes[0..@sizeOf(@TypeOf(passthrough))], std.mem.asBytes(&passthrough));
-        @memcpy(program.bytes[256..][0..@sizeOf(@TypeOf(sample))], std.mem.asBytes(&sample));
+        @memcpy(program.bytes[256..][0..@sizeOf(@TypeOf(tint))], std.mem.asBytes(&tint));
 
         gpu.surface(frame, texture_hint | target_hint | scanout, x8r8g8b8, width, height);
-        gpu.surface(vertices, vertex_hint, buffer, layers * quad_bytes, 1);
-        gpu.surface(probe, texture_hint, x8r8g8b8, 2, 2);
+        gpu.surface(vertices, vertex_hint, buffer, vertex_pages * 4096, 1);
+        gpu.surface(atlas, texture_hint, a8r8g8b8, atlas_size, atlas_size);
         gpu.surface(result, target_hint, x8r8g8b8, 4, 4);
 
         device.submit(define_context, &.{context});
         device.submit(bind_context, &.{ context, state, 0 });
         device.submit(define_shader, &.{ 0, vertex_shader, @sizeOf(@TypeOf(passthrough)) });
         device.submit(bind_shader, &.{ 0, code, 0 });
-        device.submit(define_shader, &.{ 1, pixel_shader, @sizeOf(@TypeOf(sample)) });
+        device.submit(define_shader, &.{ 1, pixel_shader, @sizeOf(@TypeOf(tint)) });
         device.submit(bind_shader, &.{ 1, code, 256 });
         device.submit(set_z_range, &.{ context, @bitCast(@as(f32, 0)), @bitCast(@as(f32, 1)) });
 
-        // Flat shading takes a slow path on some hosts; nothing here is depth-tested, lit, fogged, culled, or blended.
+        // Flat shading takes a slow path on some hosts; colours arrive premultiplied, so blending adds what lies beneath.
         device.submit(set_render_state, &.{
 
             context,
@@ -196,15 +277,18 @@ pub const Gpu = struct {
             z_enable, 0,
             z_write, 0,
             alpha_test, 0,
-            blend, 0,
             fog, 0,
             stencil, 0,
             lighting, 0,
             cull_mode, cull_none,
+            blend, 1,
+            source_blend, one,
+            target_blend, inverse_source_alpha,
+            blend_equation, add,
 
         });
 
-        // Point sampling at texel centres copies client pixels exactly.
+        // Point sampling at texel centres copies atlas texels exactly.
         device.submit(set_texture_state, &.{
 
             context,
@@ -213,11 +297,25 @@ pub const Gpu = struct {
             0, mip_filter, 0,
             0, address_u, clamp,
             0, address_v, clamp,
+            0, bind_texture, atlas,
 
         });
 
         device.submit(set_shader, &.{ context, vertex_shader, 0 });
         device.submit(set_shader, &.{ context, pixel_shader, 1 });
+
+        const texels = std.mem.bytesAsSlice(u32, gpu.atlas.bytes);
+
+        for (0..solid) |y| @memset(texels[y * atlas_size ..][0..solid], 0xffffffff);
+        texels[half] = 0x80808080;
+        gpu.cursor.x = solid + 1;
+        gpu.shelf = solid;
+        gpu.dirty = .{
+
+            .width = solid + 1,
+            .height = solid,
+
+        };
 
         // Hosts disagree on where pixel centres fall, so take whichever convention draws the pattern exactly.
         const settled = for ([_]f32{ 0.5, 0 }) |shift| {
@@ -236,89 +334,439 @@ pub const Gpu = struct {
         device.submit(define_target, &.{ 0, width, height, 0, 0, primary, 0 });
         device.submit(bind_target, &.{ 0, frame, 0, 0 });
 
+        gpu.columns = width;
+        gpu.rows = height;
+
         return gpu;
 
     }
 
-    /// Makes client surface `index` drawable from `memory`, a `width` by `height` image; false when it does not fit.
-    pub fn adopt(self: *Gpu, index: u32, memory: []align(4096) const u8, width: u32, height: u32) bool {
+    // ponytail: each mode switch leaks the old frame's DMA pages; reuse them if switching becomes frequent.
+    /// Gives back the memory the device reads; the pages it writes stay reserved.
+    pub fn release(self: *Gpu) void {
 
-        const id = textures + index;
-        const paging = &self.paging[id];
+        api.detach(self.vertices.handle);
+        api.detach(self.atlas.handle);
 
-        for (0..memory.len / 4096) |page| {
+    }
 
-            const physical = api.physical(@intFromPtr(memory.ptr) + page * 4096) catch return false;
+    /// Starts redrawing `area` of the frame from the background up.
+    pub fn begin(self: *Gpu, area: gui.Rect) void {
 
-            paging.set(page, physical) catch return false;
+        self.device.submit(clear, &.{ context, clear_color, gui.theme.background, @bitCast(@as(f32, 1)), 0, @intCast(area.x), @intCast(area.y), @intCast(area.width), @intCast(area.height) });
+
+    }
+
+    /// Queues `bytes` of drawing commands, shifted by `origin` and kept inside `limit`.
+    pub fn render(self: *Gpu, bytes: []const u8, origin: gui.Point, limit: gui.Rect) void {
+
+        var commands = gui.draw.iterate(bytes);
+
+        while (commands.next()) |command| {
+
+            switch (command) {
+
+                .shape => |shape| self.rounded(gui.draw.move(shape.area, origin), shape.radius, shape.color, limit.intersect(gui.draw.move(shape.clip, origin)) orelse continue),
+                .text => |line| self.write(line.string, line.size, line.x + origin.x, line.baseline + origin.y, line.color, limit.intersect(gui.draw.move(line.clip, origin)) orelse continue),
+
+            }
 
         }
 
-        self.describe(id, memory.len / 4096) catch return false;
-        self.surface(id, texture_hint, x8r8g8b8, width, height);
-        self.upload(index, .{
+    }
 
+    /// Draws what was queued and shows `area` of the frame.
+    pub fn finish(self: *Gpu, area: gui.Rect) void {
+
+        self.flush();
+        self.device.submit(update_target, &.{ 0, @intCast(area.x), @intCast(area.y), @intCast(area.width), @intCast(area.height) });
+
+    }
+
+    /// Fills `area` with anti-aliased corners, as a solid cross and four corner masks.
+    fn rounded(self: *Gpu, area: gui.Rect, radius: i32, color: u32, clip: gui.Rect) void {
+
+        const limit = @min(radius, @divTrunc(@min(area.width, area.height), 2));
+        const mask = if (limit > 0 and limit <= largest_corner) self.corner(@intCast(limit)) else null;
+        const slot = mask orelse return self.quad(area, null, false, false, color, clip);
+        const r = limit;
+
+        self.quad(.{
+
+            .x = area.x,
+            .y = area.y + r,
+            .width = area.width,
+            .height = area.height - 2 * r,
+
+        }, null, false, false, color, clip);
+
+        for ([_]i32{ area.y, area.bottom() - r }) |y| {
+
+            self.quad(.{
+
+                .x = area.x + r,
+                .y = y,
+                .width = area.width - 2 * r,
+                .height = r,
+
+            }, null, false, false, color, clip);
+
+        }
+
+        for ([_]bool{ false, true }) |bottom| {
+
+            for ([_]bool{ false, true }) |right| {
+
+                self.quad(.{
+
+                    .x = if (right) area.right() - r else area.x,
+                    .y = if (bottom) area.bottom() - r else area.y,
+                    .width = r,
+                    .height = r,
+
+                }, slot, right, bottom, color, clip);
+
+            }
+
+        }
+
+    }
+
+    /// Lays out UTF-8 `string` like `Canvas.text`, one glyph quad per character.
+    fn write(self: *Gpu, string: []const u8, size: f32, x: i32, baseline: i32, color: u32, clip: gui.Rect) void {
+
+        const face = gui.sans();
+        const scale = size / face.units;
+        var pen: f32 = @floatFromInt(x);
+        var previous: u16 = 0;
+        var characters = gui.font.decode(string);
+
+        while (characters.next()) |char| {
+
+            const glyph = face.lookup(char);
+
+            pen += face.kerning(previous, glyph) * scale;
+            previous = glyph;
+
+            const whole = @floor(pen);
+            const left: i32 = @intFromFloat(whole);
+
+            if (left > clip.right()) return;
+
+            // Quarter-pixel positions keep spacing even while letting each shape be cached.
+            if (self.letter(glyph, size, @intFromFloat((pen - whole) * 4))) |slot| self.quad(.{
+
+                .x = left + slot.left,
+                .y = baseline + slot.top,
+                .width = @intCast(slot.width),
+                .height = @intCast(slot.height),
+
+            }, slot, false, false, color, clip);
+
+            pen += face.advance(glyph) * scale;
+
+        }
+
+    }
+
+    /// Stages one quad of `area` within `clip`, sampling `slot` one texel per pixel, or the solid block when null.
+    fn quad(self: *Gpu, area: gui.Rect, slot: ?Slot, mirror_x: bool, mirror_y: bool, color: u32, clip: gui.Rect) void {
+
+        const visible = area.intersect(clip) orelse return;
+
+        if (self.count == quads) self.flush();
+
+        // The device may still be copying the last batch out of the staging memory.
+        if (self.busy) {
+
+            self.device.idle();
+            self.busy = false;
+
+        }
+
+        const centre: f32 = @as(f32, solid / 2) / atlas_size;
+        var u = [2]f32{ centre, centre };
+        var v = [2]f32{ centre, centre };
+
+        if (slot) |source| {
+
+            u = .{ texel(source.x, source.width, visible.x - area.x, mirror_x), texel(source.x, source.width, visible.right() - area.x, mirror_x) };
+            v = .{ texel(source.y, source.height, visible.y - area.y, mirror_y), texel(source.y, source.height, visible.bottom() - area.y, mirror_y) };
+
+        }
+
+        const left = edge(visible.x, self.columns, self.shift);
+        const right = edge(visible.right(), self.columns, self.shift);
+        const top = -edge(visible.y, self.rows, self.shift);
+        const bottom = -edge(visible.bottom(), self.rows, self.shift);
+        const tinted = 0xff000000 | color;
+        const staged: *[6]Vertex = @ptrCast(@alignCast(self.vertices.bytes[self.count * quad_bytes ..][0..quad_bytes]));
+
+        staged.* = .{
+
+            .{ .x = left, .y = top, .u = u[0], .v = v[0], .color = tinted },
+            .{ .x = right, .y = top, .u = u[1], .v = v[0], .color = tinted },
+            .{ .x = right, .y = bottom, .u = u[1], .v = v[1], .color = tinted },
+            .{ .x = left, .y = top, .u = u[0], .v = v[0], .color = tinted },
+            .{ .x = right, .y = bottom, .u = u[1], .v = v[1], .color = tinted },
+            .{ .x = left, .y = bottom, .u = u[0], .v = v[1], .color = tinted },
+
+        };
+        self.count += 1;
+
+    }
+
+    /// Uploads new atlas texels and the staged quads, then draws them in one call.
+    fn flush(self: *Gpu) void {
+
+        if (self.dirty.width > 0) {
+
+            self.update(atlas, @intCast(self.dirty.x), @intCast(self.dirty.y), @intCast(self.dirty.width), @intCast(self.dirty.height));
+            self.dirty = .{};
+
+        }
+
+        if (self.count == 0) return;
+
+        const stride = @sizeOf(Vertex);
+
+        self.update(vertices, 0, 0, @intCast(self.count * quad_bytes), 1);
+
+        // Three arrays read the interleaved position, texture coordinate, and colour, then one unindexed range of triangles.
+        self.device.submit(draw, &.{
+
+            context, 3, 1,
+            float2, 0, position, 0, vertices, 0, stride, 0, 0,
+            float2, 0, texcoord, 0, vertices, 8, stride, 0, 0,
+            packed_color, 0, vertex_color, 0, vertices, 16, stride, 0, 0,
+            triangle_list, @intCast(self.count * 2), no_id, 0, 0, 0, 0,
+
+        });
+
+        self.count = 0;
+        self.busy = true;
+
+    }
+
+    fn corner(self: *Gpu, radius: u32) ?Slot {
+
+        const key = pack(.corner, radius, 0, 0);
+        if (cached(key)) |slot| return slot;
+
+        const slot = self.insert(key, radius, radius) orelse return null;
+        const r: f32 = @floatFromInt(radius);
+        const texels = std.mem.bytesAsSlice(u32, self.atlas.bytes);
+
+        // The top-left quarter of a circle centred on the mask's far corner, covered as `Canvas.round` covers it.
+        for (0..radius) |y| {
+
+            for (0..radius) |x| {
+
+                const dx = @as(f32, @floatFromInt(x)) + 0.5 - r;
+                const dy = @as(f32, @floatFromInt(y)) + 0.5 - r;
+
+                texels[(slot.y + y) * atlas_size + slot.x + x] = coverage(r - @sqrt(dx * dx + dy * dy) + 0.5);
+
+            }
+
+        }
+
+        return slot;
+
+    }
+
+    fn letter(self: *Gpu, index: u16, size: f32, quarter: u2) ?Slot {
+
+        const key = pack(.glyph, index, size, quarter);
+        if (cached(key)) |slot| return if (slot.width == 0) null else slot;
+
+        const face = gui.sans();
+        const bitmap = face.render(index, size / face.units, @as(f32, @floatFromInt(quarter)) / 4) orelse {
+
+            _ = self.insert(key, 0, 0);
+            return null;
+
+        };
+
+        var slot = self.insert(key, @intCast(bitmap.width), @intCast(bitmap.height)) orelse return null;
+        const texels = std.mem.bytesAsSlice(u32, self.atlas.bytes);
+
+        for (0..bitmap.height) |y| {
+
+            for (0..bitmap.width) |x| texels[(slot.y + y) * atlas_size + slot.x + x] = coverage(bitmap.coverage[y * bitmap.width + x]);
+
+        }
+
+        slot.left = bitmap.left;
+        slot.top = bitmap.top;
+        find(key).?.* = slot;
+
+        return slot;
+
+    }
+
+    fn cached(key: u64) ?Slot {
+
+        const slot = find(key) orelse return null;
+
+        return if (slot.key == key) slot.* else null;
+
+    }
+
+    /// The slot holding `key`, or the empty one it would take.
+    fn find(key: u64) ?*Slot {
+
+        var index: usize = @intCast(std.hash.int(key) % slots.len);
+
+        for (0..slots.len) |_| {
+
+            const slot = &slots[index];
+            if (slot.key == key or slot.key == 0) return slot;
+
+            index = (index + 1) % slots.len;
+
+        }
+
+        return null;
+
+    }
+
+    /// Reserves a `width` by `height` atlas area for `key`, starting over once the atlas or table fills.
+    fn insert(self: *Gpu, key: u64, width: u32, height: u32) ?Slot {
+
+        if (self.filled * 4 >= slots.len * 3) self.reset();
+
+        const place = self.allocate(width, height) orelse blk: {
+
+            self.reset();
+            break :blk self.allocate(width, height) orelse return null;
+
+        };
+
+        const slot = find(key) orelse return null;
+
+        slot.* = .{
+
+            .key = key,
+            .x = place.x,
+            .y = place.y,
+            .width = width,
+            .height = height,
+
+        };
+        self.filled += 1;
+        self.dirty = self.dirty.join(.{
+
+            .x = @intCast(place.x),
+            .y = @intCast(place.y),
             .width = @intCast(width),
             .height = @intCast(height),
 
         });
 
-        return true;
+        return slot.*;
 
     }
 
-    /// Copies `area` of client surface `index` into its texture.
-    pub fn upload(self: *Gpu, index: u32, area: gui.Rect) void {
+    fn allocate(self: *Gpu, width: u32, height: u32) ?struct { x: u32, y: u32 } {
 
-        self.update(textures + index, @intCast(area.x), @intCast(area.y), @intCast(area.width), @intCast(area.height));
+        if (width == 0 or height == 0) return .{
+
+            .x = 0,
+            .y = 0,
+
+        };
+
+        var x: u32 = @intCast(self.cursor.x);
+        var y: u32 = @intCast(self.cursor.y);
+
+        if (x + width > atlas_size) {
+
+            y += self.shelf;
+            x = 0;
+            self.shelf = 0;
+
+        }
+
+        if (y + height > atlas_size) return null;
+
+        self.cursor = .{
+
+            .x = @intCast(x + width),
+            .y = @intCast(y),
+
+        };
+        self.shelf = @max(self.shelf, height);
+
+        return .{
+
+            .x = x,
+            .y = y,
+
+        };
 
     }
 
-    /// Drops client surface `index`; once this returns the device no longer touches its memory.
-    pub fn release(self: *Gpu, index: u32) void {
+    /// Forgets every cached shape; queued quads are drawn first, since new shapes will overwrite theirs.
+    fn reset(self: *Gpu) void {
 
-        self.device.submit(destroy_surface, &.{textures + index});
-        self.device.submit(destroy_object, &.{textures + index});
+        self.flush();
         self.device.idle();
+        self.busy = false;
+
+        @memset(&slots, .{});
+        self.filled = 0;
+        self.cursor = .{
+
+            .x = solid + 1,
+
+        };
+        self.shelf = solid;
 
     }
 
-    /// Redraws the frame from `stack`, bottom first, and shows `area` of it.
-    pub fn compose(self: *Gpu, area: gui.Rect, stack: []const Layer) void {
-
-        self.device.submit(clear, &.{ context, clear_color, gui.theme.background, @bitCast(@as(f32, 1)), 0, 0, 0, self.width, self.height });
-        for (stack, 0..) |layer, slot| self.quad(@intCast(slot), textures + layer.index, layer.area, self.width, self.height);
-
-        self.device.submit(update_target, &.{ 0, @intCast(area.x), @intCast(area.y), @intCast(area.width), @intCast(area.height) });
-
-        // Clients redraw as soon as we reply, so their pixels must already be copied.
-        self.device.idle();
-
-    }
-
-    /// Draws a two-by-two texture one pixel in from the corner of a four-by-four target; true when every pixel lands exactly.
+    /// Draws a solid red block and a half-covered blue texel on grey in a four-by-four target; true when every pixel reads back right.
     fn check(self: *Gpu) bool {
 
-        const texels = [4]u32{ 0xff0000, 0x00ff00, 0x0000ff, 0xffffff };
-        const border = 0x808080;
+        const grey = 0x808080;
 
-        @memcpy(self.texels.bytes[0..16], std.mem.asBytes(&texels));
-        self.update(probe, 0, 0, 2, 2);
-
+        self.columns = 4;
+        self.rows = 4;
         self.device.submit(set_render_target, &.{ context, color0, result, 0, 0 });
         self.device.submit(set_viewport, &.{ context, 0, 0, 4, 4 });
-        self.device.submit(clear, &.{ context, clear_color, border, @bitCast(@as(f32, 1)), 0, 0, 0, 4, 4 });
-        self.quad(0, probe, .{
+        self.device.submit(clear, &.{ context, clear_color, grey, @bitCast(@as(f32, 1)), 0, 0, 0, 4, 4 });
+
+        const all = gui.Rect{
+
+            .width = 4,
+            .height = 4,
+
+        };
+
+        self.quad(.{
 
             .x = 1,
             .y = 1,
             .width = 2,
             .height = 2,
 
-        }, 4, 4);
+        }, null, false, false, 0xff0000, all);
+        self.quad(.{
 
+            .width = 1,
+            .height = 1,
+
+        }, .{
+
+            .x = half,
+            .width = 1,
+            .height = 1,
+
+        }, false, false, 0x0000ff, all);
+        self.flush();
         self.device.submit(readback_image, &.{ result, 0, 0 });
         self.device.idle();
+        self.busy = false;
 
         const pixels: *const volatile [16]u32 = @ptrCast(self.readback.bytes);
 
@@ -327,10 +775,10 @@ pub const Gpu = struct {
             for (0..4) |x| {
 
                 const inside = (x == 1 or x == 2) and (y == 1 or y == 2);
-                const expected: u32 = if (inside) texels[(y - 1) * 2 + x - 1] else border;
+                const expected: u32 = if (inside) 0xff0000 else if (x == 0 and y == 0) 0x4040c0 else grey;
                 const actual = pixels[y * 4 + x] & 0xffffff;
 
-                if (actual == expected) continue;
+                if (near(actual, expected)) continue;
 
                 var line: [80]u8 = undefined;
 
@@ -343,28 +791,6 @@ pub const Gpu = struct {
         }
 
         return true;
-
-    }
-
-    /// Draws texture `sid` over `area` of a `columns` by `rows` target, staging its corners in vertex slot `slot`.
-    fn quad(self: *Gpu, slot: u32, sid: u32, area: gui.Rect, columns: u32, rows: u32) void {
-
-        const offset = slot * quad_bytes;
-        const corners = place(area.x, area.y, area.width, area.height, columns, rows, self.shift);
-
-        @memcpy(self.staging.bytes[offset..][0..quad_bytes], std.mem.asBytes(&corners));
-        self.update(vertices, offset, 0, quad_bytes, 1);
-        self.device.submit(set_texture_state, &.{ context, 0, bind_texture, sid });
-
-        // Two arrays read the interleaved position and texture coordinate, then one unindexed range of two triangles.
-        self.device.submit(draw, &.{
-
-            context, 2, 1,
-            float2, 0, position, 0, vertices, offset, 16, 0, 0,
-            float2, 0, texcoord, 0, vertices, offset + 8, 16, 0, 0,
-            triangle_list, 2, no_id, 0, 0, 0, 0,
-
-        });
 
     }
 
@@ -394,7 +820,7 @@ pub const Gpu = struct {
             const page = try api.dma();
 
             if (index == 0) first = page;
-            try self.paging[id].set(index, page.physical);
+            try maps[id].set(index, page.physical);
 
         }
 
@@ -404,23 +830,34 @@ pub const Gpu = struct {
 
     }
 
+    /// Makes memory object `id` from `memory`, which the device only ever reads.
+    fn lend(self: *Gpu, id: u32, memory: api.Shared) !void {
+
+        const count = memory.bytes.len / 4096;
+
+        for (0..count) |page| try maps[id].set(page, try api.physical(@intFromPtr(memory.bytes.ptr) + page * 4096));
+
+        try self.describe(id, count);
+
+    }
+
     /// Defines memory object `id` over the `count` pages its page tables list.
     fn describe(self: *Gpu, id: u32, count: usize) !void {
 
-        const paging = &self.paging[id];
+        const map = &maps[id];
         var depth: u32 = one_level;
-        var root = paging.pages[1].?.physical;
+        var root = map.pages[1].?.physical;
 
         if (count > 512) {
 
-            if (paging.pages[0] == null) paging.pages[0] = try api.dma();
+            if (map.pages[0] == null) map.pages[0] = try api.dma();
 
-            const directory: *[512]u64 = @ptrCast(paging.pages[0].?.bytes);
+            const directory: *[512]u64 = @ptrCast(map.pages[0].?.bytes);
 
-            for (0..(count + 511) / 512) |leaf| directory[leaf] = paging.pages[1 + leaf].?.physical >> 12;
+            for (0..(count + 511) / 512) |leaf| directory[leaf] = map.pages[1 + leaf].?.physical >> 12;
 
             depth = two_levels;
-            root = paging.pages[0].?.physical;
+            root = map.pages[0].?.physical;
 
         }
 
@@ -430,14 +867,14 @@ pub const Gpu = struct {
 
 };
 
-/// Page tables listing up to 2048 pages (8 MiB): a directory, then up to four leaves of 512 page numbers each.
+/// Page tables listing up to 16384 pages (64 MiB, a 4K frame twice over): a directory, then leaves of 512 page numbers each.
 const Paging = struct {
 
-    pages: [5]?api.Page = [_]?api.Page{null} ** 5,
+    pages: [33]?api.Page = [_]?api.Page{null} ** 33,
 
     fn set(self: *Paging, index: usize, physical: u64) !void {
 
-        if (index >= 4 * 512) return error.TooLarge;
+        if (index >= 32 * 512) return error.TooLarge;
 
         const leaf = &self.pages[1 + index / 512];
 
@@ -451,29 +888,48 @@ const Paging = struct {
 
 };
 
-/// Clip-space corners and texture coordinates of two triangles covering an area of a `columns` by `rows` frame.
-pub fn place(x: i32, y: i32, width: i32, height: i32, columns: u32, rows: u32, shift: f32) [24]f32 {
+/// The clip-space position of pixel edge `edge` along a `span`-pixel axis.
+pub fn edge(at: i32, span: u32, shift: f32) f32 {
 
-    const left = clip(x, columns, shift);
-    const right = clip(x + width, columns, shift);
-    const top = -clip(y, rows, shift);
-    const bottom = -clip(y + height, rows, shift);
-
-    return .{
-
-        left, top, 0, 0,
-        right, top, 1, 0,
-        right, bottom, 1, 1,
-        left, top, 0, 0,
-        right, bottom, 1, 1,
-        left, bottom, 0, 1,
-
-    };
+    return (@as(f32, @floatFromInt(at)) - shift) * 2 / @as(f32, @floatFromInt(span)) - 1;
 
 }
 
-fn clip(edge: i32, span: u32, shift: f32) f32 {
+/// The texture coordinate `offset` texels into a slot, counted from its far side when mirrored.
+pub fn texel(start: u32, span: u32, offset: i32, mirror: bool) f32 {
 
-    return (@as(f32, @floatFromInt(edge)) - shift) * 2 / @as(f32, @floatFromInt(span)) - 1;
+    const along: i32 = if (mirror) @as(i32, @intCast(span)) - offset else offset;
+
+    return @as(f32, @floatFromInt(@as(i32, @intCast(start)) + along)) / atlas_size;
+
+}
+
+/// Premultiplied white at `amount` coverage.
+fn coverage(amount: f32) u32 {
+
+    const level: u32 = @intFromFloat(std.math.clamp(amount, 0, 1) * 255 + 0.5);
+
+    return level * 0x01010101;
+
+}
+
+fn pack(kind: Kind, code_point: u32, size: f32, quarter: u2) u64 {
+
+    return 1 << 63 | @as(u64, @intFromEnum(kind)) << 61 | @as(u64, quarter) << 59 | @as(u64, code_point) << 32 | @as(u32, @bitCast(size));
+
+}
+
+fn near(actual: u32, expected: u32) bool {
+
+    for ([_]u5{ 0, 8, 16 }) |shift| {
+
+        const a: i32 = @intCast(actual >> shift & 0xff);
+        const b: i32 = @intCast(expected >> shift & 0xff);
+
+        if (@abs(a - b) > 3) return false;
+
+    }
+
+    return true;
 
 }

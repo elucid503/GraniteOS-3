@@ -1,0 +1,170 @@
+const canvas = @import("canvas.zig");
+const theme = @import("theme.zig");
+
+pub const Alignment = canvas.Alignment;
+
+pub const Direction = enum {
+
+    column,
+    row,
+
+};
+
+/// Placement along an axis; `stretch` fills the cross axis and acts as `start` on the main one.
+pub const Align = enum {
+
+    start,
+    center,
+    end,
+    stretch,
+
+};
+
+pub const Edges = struct {
+
+    top: i32 = 0,
+    right: i32 = 0,
+    bottom: i32 = 0,
+    left: i32 = 0,
+
+    pub fn all(amount: i32) Edges {
+
+        return .{
+
+            .top = amount,
+            .right = amount,
+            .bottom = amount,
+            .left = amount,
+
+        };
+
+    }
+
+    pub fn axes(vertical: i32, horizontal: i32) Edges {
+
+        return .{
+
+            .top = vertical,
+            .right = horizontal,
+            .bottom = vertical,
+            .left = horizontal,
+
+        };
+
+    }
+
+    pub fn shrink(self: Edges, area: canvas.Rect) canvas.Rect {
+
+        return .{
+
+            .x = area.x + self.left,
+            .y = area.y + self.top,
+            .width = area.width - self.left - self.right,
+            .height = area.height - self.top - self.bottom,
+
+        };
+
+    }
+
+};
+
+/// Colours a state overrides; null keeps the base style's.
+pub const Paint = struct {
+
+    background: ?u32 = null,
+    color: ?u32 = null,
+    border: ?u32 = null,
+
+    fn over(self: Paint, top: Paint) Paint {
+
+        return .{
+
+            .background = top.background orelse self.background,
+            .color = top.color orelse self.color,
+            .border = top.border orelse self.border,
+
+        };
+
+    }
+
+};
+
+/// A node's box, flex layout, and look, with per-state colour overrides like CSS pseudo-classes.
+pub const Style = struct {
+
+    /// Fixed size; null sizes to content.
+    width: ?i32 = null,
+    height: ?i32 = null,
+
+    /// Share of a container's spare main-axis space, like `flex-grow`.
+    grow: u8 = 0,
+
+    padding: Edges = .{},
+
+    /// How a container lays out its children.
+    direction: Direction = .column,
+    gap: i32 = 0,
+    justify: Align = .start,
+    items: Align = .stretch,
+
+    background: ?u32 = null,
+    color: u32 = theme.text,
+    border: ?u32 = null,
+    border_width: i32 = 0,
+    radius: i32 = 0,
+
+    size: f32 = theme.body,
+    text_align: Alignment = .left,
+
+    /// Placeholder text and secondary content.
+    muted: u32 = theme.muted,
+
+    hover: Paint = .{},
+    selected: Paint = .{},
+    focus: Paint = .{},
+    pressed: Paint = .{},
+    invalid: Paint = .{},
+
+    /// This style with the fields of struct `changes` replaced, like an inline style over a class.
+    pub fn with(self: Style, changes: anytype) Style {
+
+        var result = self;
+
+        inline for (@typeInfo(@TypeOf(changes)).@"struct".fields) |field| @field(result, field.name) = @field(changes, field.name);
+
+        return result;
+
+    }
+
+    /// The colours for a node in the given states; later states win.
+    pub fn paint(self: *const Style, state: State) Paint {
+
+        var result = Paint{
+
+            .background = self.background,
+            .color = self.color,
+            .border = self.border,
+
+        };
+
+        if (state.hover) result = result.over(self.hover);
+        if (state.selected) result = result.over(self.selected);
+        if (state.focus) result = result.over(self.focus);
+        if (state.pressed) result = result.over(self.pressed);
+        if (state.invalid) result = result.over(self.invalid);
+
+        return result;
+
+    }
+
+};
+
+pub const State = struct {
+
+    hover: bool = false,
+    selected: bool = false,
+    focus: bool = false,
+    pressed: bool = false,
+    invalid: bool = false,
+
+};
