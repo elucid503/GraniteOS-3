@@ -69,7 +69,7 @@ fn privileged(permission: abi.Permission) bool {
 
     return switch (permission) {
 
-        .ports, .mmio, .reboot, .management, .dma => true,
+        .ports, .mmio, .power, .management, .dma, .accounts, .firmware => true,
         else => false,
 
     };

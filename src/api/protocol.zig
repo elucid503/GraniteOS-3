@@ -5,6 +5,7 @@ pub const missing = invalid - 2;
 pub const exists = invalid - 3;
 pub const full = invalid - 4;
 pub const busy = invalid - 5;
+pub const denied = invalid - 6;
 
 pub const Operation = enum(u8) {
 
@@ -26,6 +27,12 @@ pub const Operation = enum(u8) {
     directory,
     remove,
     volume,
+    change,
+    login,
+    logout,
+    password,
+    install,
+    power,
     _,
 
 };

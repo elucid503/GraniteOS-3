@@ -9,6 +9,14 @@ pub const panic = api.panic;
 
 const Error = api.ApiError || error{Usage};
 
+const Mode = enum {
+
+    command,
+    plain,
+    secret,
+
+};
+
 const Command = struct {
 
     usage: []const u8,
@@ -48,6 +56,22 @@ const groups = [_]Group{
     },
     .{
 
+        .title = "accounts",
+        .commands = &.{
+
+            command("whoami", "Print the logged-in account", whoami),
+            command("users", "List accounts", users),
+            command("useradd NAME [admin]", "Create an account (administrators)", useradd),
+            command("userdel NAME", "Remove an account (administrators)", userdel),
+            command("passwd [NAME]", "Change a password", passwd),
+            command("lock", "Lock the terminal until your password is entered", lock),
+            command("logout", "End this session", logout),
+
+        },
+
+    },
+    .{
+
         .title = "system",
         .commands = &.{
 
@@ -55,6 +79,9 @@ const groups = [_]Group{
             command("uptime", "Time since boot", uptime),
             command("permissions", "List this process' permissions", permissions),
             command("services", "List running services", services),
+            command("install", "Install GraniteOS beside the existing OS", install),
+            command("reboot", "Restart the machine", reboot),
+            command("shutdown", "Power off the machine", shutdown),
 
         },
 
@@ -65,8 +92,8 @@ const groups = [_]Group{
         .commands = &.{
 
             command("ping", "Call the helper service", ping),
-            command("crash NAME", "Crash a service (helper, serial, storage, files)", crash),
-            command("restart NAME", "Restart a service (helper, serial, storage, files)", restart),
+            command("crash NAME", "Crash a service (administrators)", crash),
+            command("restart NAME", "Restart a service (administrators)", restart),
 
         },
 
@@ -82,6 +109,7 @@ const groups = [_]Group{
             command("write PATH TEXT", "Replace a file with a line of text", write),
             command("mkdir PATH", "Create a directory", mkdir),
             command("rm PATH", "Remove a file or empty directory", rm),
+            command("chmod MODE PATH", "Set owner and other permissions (octal)", chmod),
             command("volume", "Show volume capacity and free space", volume),
 
         },
@@ -94,6 +122,9 @@ var terminal: api.Terminal = undefined;
 var files = api.Files{
 
 };
+var accounts = api.Accounts{
+
+};
 
 var cwd: [200]u8 = undefined;
 var cwd_length: usize = 1;
@@ -101,6 +132,16 @@ var target: [line.capacity + cwd.len]u8 = undefined;
 var editor = line.Line{
 
 };
+var shown: []const u8 = "";
+var mode: Mode = .command;
+
+var user: [32]u8 = undefined;
+var user_length: usize = 0;
+var active = false;
+
+var owner_id: u32 = 0;
+var owner_name: [32]u8 = undefined;
+var owner_length: usize = 0;
 
 var served: u64 = 0;
 
@@ -112,18 +153,13 @@ pub export fn app_main(_: usize, supervisor: usize, environment: *const api.abi.
         .supervisor = supervisor,
 
     };
-    cwd[0] = '/';
 
     while (true) {
 
-        terminal.write("\nOBSIDIAN ......... Ready\n\nType 'help' for available commands.\n\n") catch {
+        terminal.write("\nOBSIDIAN ......... Ready\n") catch {
 
             api.sleep(10);
             continue;
-
-        };
-
-        prompt() catch {
 
         };
 
@@ -133,17 +169,8 @@ pub export fn app_main(_: usize, supervisor: usize, environment: *const api.abi.
 
     while (true) {
 
-        serve();
-        const byte = (terminal.read() catch null) orelse {
-
-            api.sleep(1);
-            continue;
-
-        };
-
-        handle(byte) catch {
-
-        };
+        login();
+        session();
 
     }
 
@@ -173,61 +200,173 @@ fn serve() void {
 
 }
 
-fn handle(byte: u8) api.ApiError!void {
+// Runs as nobody until a login succeeds; with no accounts at all, setup proceeds as nobody.
+fn login() void {
 
-    switch (editor.push(byte)) {
+    user_length = 0;
+    cwd_length = 1;
+    cwd[0] = '/';
 
-        .none => {
+    while (true) {
 
-        },
-        .echo => try terminal.write(editor.text()[editor.len - 1 ..]),
-        .erase => try terminal.write("\x08 \x08"),
-        .redraw => try redraw(),
-        .bell => try terminal.write("\x07"),
-        .complete => try complete(),
-        .clear => {
+        const first = accounts.list(0) catch {
 
-            try terminal.write("\x1b[2J\x1b[H");
-            try redraw();
+            api.sleep(50);
+            continue;
 
-        },
-        .cancel => {
+        };
 
-            try terminal.write("^C\n");
-            try prompt();
+        if (first == null) {
 
-        },
-        .submit => {
+            show("\nNo accounts exist yet. Create the administrator with 'useradd NAME'.\n");
+            _ = files.usage() catch |err| if (err == error.Missing) show("No GraniteOS volume was found; run 'install' first.\n");
+            show("Type 'help' for available commands.\n\n");
 
-            defer editor.reset();
-            try terminal.write("\n");
-            execute(std.mem.trim(u8, editor.text(), " "));
-            try prompt();
+            return;
 
-        },
+        }
+
+        var name: [line.capacity]u8 = undefined;
+        var secret: [line.capacity]u8 = undefined;
+        defer std.crypto.secureZero(u8, &secret);
+
+        show("\n");
+
+        const entered = ask("login: ", .plain, &name);
+        if (entered.len == 0 or entered.len > user.len) continue;
+
+        const password = ask("password: ", .secret, &secret);
+
+        _ = accounts.login(entered, password) catch |err| {
+
+            show(if (err == error.Denied) "Login incorrect.\n" else "Accounts service unavailable.\n");
+            continue;
+
+        };
+
+        @memcpy(user[0..entered.len], entered);
+        user_length = entered.len;
+
+        const home = std.fmt.bufPrint(&cwd, "/home/{s}", .{entered}) catch unreachable;
+
+        cwd_length = home.len;
+        say("\nWelcome, {s}. Type 'help' for available commands.\n\n", .{entered});
+
+        return;
 
     }
 
 }
 
-fn prompt() api.ApiError!void {
+fn session() void {
 
-    try terminal.print("obsidian [{s}]> ", .{cwd[0..cwd_length]});
+    active = true;
+
+    while (active) {
+
+        var label: [cwd.len + 16]u8 = undefined;
+        var text: [line.capacity]u8 = undefined;
+        const prompt = std.fmt.bufPrint(&label, "obsidian [{s}]> ", .{cwd[0..cwd_length]}) catch unreachable;
+
+        execute(std.mem.trim(u8, ask(prompt, .command, &text), " "));
+
+    }
 
 }
 
-fn redraw() api.ApiError!void {
+// Edits one line after `prompt` into `out`; secret lines are never echoed or recorded.
+fn ask(prompt: []const u8, kind: Mode, out: []u8) []const u8 {
 
-    if (editor.cursor == editor.len) return terminal.print("\robsidian [{s}]> {s}\x1b[K", .{ cwd[0..cwd_length], editor.text() });
+    mode = kind;
+    shown = prompt;
+    editor.reset();
+    editor.record = kind == .command;
+    show(prompt);
 
-    try terminal.print("\robsidian [{s}]> {s}\x1b[K\x1b[{d}D", .{ cwd[0..cwd_length], editor.text(), editor.len - editor.cursor });
+    while (true) {
+
+        switch (editor.push(next())) {
+
+            .none => {
+
+            },
+            .submit => break,
+            .cancel => {
+
+                show("^C\n");
+                show(prompt);
+
+            },
+            .clear => {
+
+                show("\x1b[2J\x1b[H");
+                redraw();
+
+            },
+            .bell => show("\x07"),
+            .echo => if (kind != .secret) show(editor.text()[editor.len - 1 ..]),
+            .erase => if (kind != .secret) show("\x08 \x08"),
+            .redraw => redraw(),
+            .complete => if (kind == .command) complete() else show("\x07"),
+
+        }
+
+    }
+
+    show("\n");
+
+    const length = @min(editor.len, out.len);
+
+    @memcpy(out[0..length], editor.text()[0..length]);
+    if (kind == .secret) std.crypto.secureZero(u8, &editor.bytes);
+    editor.reset();
+
+    return out[0..length];
 
 }
 
-fn complete() api.ApiError!void {
+fn next() u8 {
+
+    while (true) {
+
+        serve();
+        if (terminal.read() catch null) |byte| return byte;
+        api.sleep(1);
+
+    }
+
+}
+
+fn show(bytes: []const u8) void {
+
+    terminal.write(bytes) catch {
+
+    };
+
+}
+
+fn say(comptime format: []const u8, arguments: anytype) void {
+
+    terminal.print(format, arguments) catch {
+
+    };
+
+}
+
+fn redraw() void {
+
+    const text = if (mode == .secret) "" else editor.text();
+
+    if (mode == .secret or editor.cursor == editor.len) return say("\r{s}{s}\x1b[K", .{ shown, text });
+
+    say("\r{s}{s}\x1b[K\x1b[{d}D", .{ shown, text, editor.len - editor.cursor });
+
+}
+
+fn complete() void {
 
     const prefix = editor.text()[0..editor.cursor];
-    if (std.mem.indexOfScalar(u8, prefix, ' ') != null) return terminal.write("\x07");
+    if (std.mem.indexOfScalar(u8, prefix, ' ') != null) return show("\x07");
 
     var first: ?[]const u8 = null;
     var shared: usize = 0;
@@ -257,7 +396,7 @@ fn complete() api.ApiError!void {
 
     }
 
-    const match = first orelse return terminal.write("\x07");
+    const match = first orelse return show("\x07");
 
     if (matches == 1) {
 
@@ -274,19 +413,19 @@ fn complete() api.ApiError!void {
 
     }
 
-    try terminal.write("\n");
+    show("\n");
     for (groups) |group| {
 
         for (group.commands) |entry| {
 
-            if (std.mem.startsWith(u8, entry.name(), prefix)) try terminal.print("{s}  ", .{entry.name()});
+            if (std.mem.startsWith(u8, entry.name(), prefix)) say("{s}  ", .{entry.name()});
 
         }
 
     }
 
-    try terminal.write("\n");
-    try redraw();
+    show("\n");
+    redraw();
 
 }
 
@@ -309,9 +448,7 @@ fn execute(text: []const u8) void {
 
             result catch |err| {
 
-                if (err == error.Usage) terminal.print("usage: {s}\n", .{entry.usage}) catch {
-
-                };
+                if (err == error.Usage) say("usage: {s}\n", .{entry.usage});
 
             };
 
@@ -321,9 +458,7 @@ fn execute(text: []const u8) void {
 
     }
 
-    terminal.print("obsidian: {s}: command not found\n", .{name}) catch {
-
-    };
+    say("obsidian: {s}: command not found\n", .{name});
 
 }
 
@@ -334,7 +469,7 @@ fn help(_: []const u8) Error!void {
     for (groups) |group| {
 
         try terminal.print("{s}\n", .{group.title});
-        for (group.commands) |entry| try terminal.print("  {s:<16}{s}\n", .{ entry.usage, entry.description });
+        for (group.commands) |entry| try terminal.print("  {s:<22}{s}\n", .{ entry.usage, entry.description });
         try terminal.write("\n");
 
     }
@@ -360,6 +495,8 @@ fn about(_: []const u8) Error!void {
         \\  - Supervised services with crash recovery
         \\  - Serial terminal and OBSIDIAN shell
         \\  - SATA storage and persistent files
+        \\  - Accounts, private homes, and file permissions
+        \\  - Installation beside an existing OS
         \\
         \\Type 'help' to see available commands.
         \\
@@ -392,6 +529,127 @@ fn history(_: []const u8) Error!void {
 
 }
 
+fn whoami(_: []const u8) Error!void {
+
+    try terminal.print("{s}\n", .{if (user_length == 0) "nobody" else user[0..user_length]});
+
+}
+
+fn users(_: []const u8) Error!void {
+
+    var index: u56 = 0;
+
+    while (accounts.list(index) catch |err| return report("users", err)) |account| : (index += 1) {
+
+        try terminal.print("  {s:<16}{d:<8}{s}\n", .{ account.name, account.identity.user, if (account.identity.admin) "admin" else "" });
+
+    }
+
+}
+
+fn useradd(argument: []const u8) Error!void {
+
+    var words = std.mem.tokenizeScalar(u8, argument, ' ');
+    const name = words.next() orelse return error.Usage;
+    const flag = words.next();
+
+    if (words.next() != null or (flag != null and !std.mem.eql(u8, flag.?, "admin"))) return error.Usage;
+
+    var password: [line.capacity]u8 = undefined;
+    defer std.crypto.secureZero(u8, &password);
+
+    const secret = choose(&password) orelse return;
+
+    accounts.create(name, secret, flag != null) catch |err| return report("useradd", err);
+    try terminal.print("useradd: created {s}\n", .{name});
+
+    if (user_length == 0) {
+
+        try terminal.write("Log in to continue.\n");
+        active = false;
+
+    }
+
+}
+
+fn userdel(argument: []const u8) Error!void {
+
+    if (argument.len == 0 or std.mem.indexOfScalar(u8, argument, ' ') != null) return error.Usage;
+
+    accounts.remove(argument) catch |err| {
+
+        return if (err == error.Busy) terminal.write("userdel: cannot remove your own account\n") else report("userdel", err);
+
+    };
+
+}
+
+fn passwd(argument: []const u8) Error!void {
+
+    const own = user[0..user_length];
+    const name = if (argument.len == 0) own else argument;
+
+    if (name.len == 0 or std.mem.indexOfScalar(u8, name, ' ') != null) return error.Usage;
+
+    var current: [line.capacity]u8 = undefined;
+    var password: [line.capacity]u8 = undefined;
+
+    defer std.crypto.secureZero(u8, &current);
+    defer std.crypto.secureZero(u8, &password);
+
+    const old = if (std.mem.eql(u8, name, own)) ask("current password: ", .secret, &current) else "";
+    const new = choose(&password) orelse return;
+
+    accounts.password(name, new, old) catch |err| return report("passwd", err);
+    try terminal.write("passwd: password updated\n");
+
+}
+
+// Asks for a new password twice; null when the entries are empty or differ.
+fn choose(out: []u8) ?[]const u8 {
+
+    var again: [line.capacity]u8 = undefined;
+    defer std.crypto.secureZero(u8, &again);
+
+    const first = ask("new password: ", .secret, out);
+    const second = ask("confirm password: ", .secret, &again);
+
+    if (first.len != 0 and std.mem.eql(u8, first, second)) return first;
+    show("passwords are empty or do not match\n");
+
+    return null;
+
+}
+
+fn lock(_: []const u8) Error!void {
+
+    if (user_length == 0) return terminal.write("lock: nobody is logged in\n");
+
+    show("\x1b[2J\x1b[H");
+
+    // Terminal failures must never fall through to an unlocked shell.
+    while (true) {
+
+        var secret: [line.capacity]u8 = undefined;
+        defer std.crypto.secureZero(u8, &secret);
+
+        say("Locked by {s}.\n", .{user[0..user_length]});
+
+        const password = ask("password: ", .secret, &secret);
+
+        if (accounts.login(user[0..user_length], password)) |_| return else |_| show("Incorrect password.\n\n");
+
+    }
+
+}
+
+fn logout(_: []const u8) Error!void {
+
+    if (user_length != 0) accounts.logout() catch |err| return report("logout", err);
+    active = false;
+
+}
+
 fn id(_: []const u8) Error!void {
 
     try terminal.print("{d}\n", .{api.identity()});
@@ -413,7 +671,7 @@ fn permissions(_: []const u8) Error!void {
 
 fn services(_: []const u8) Error!void {
 
-    for ([_]api.abi.Image{ .serial, .helper, .storage, .files, .shell }) |image| {
+    for ([_]api.abi.Image{ .serial, .helper, .storage, .files, .accounts, .install, .shell }) |image| {
 
         const peer = api.lookup(terminal.supervisor, image) catch {
 
@@ -425,6 +683,47 @@ fn services(_: []const u8) Error!void {
         try terminal.print("  {s:<10}{d}\n", .{ @tagName(image), peer });
 
     }
+
+}
+
+fn install(_: []const u8) Error!void {
+
+    const installer = api.lookup(terminal.supervisor, .install) catch return terminal.write("install: installer unavailable\n");
+
+    try terminal.write("install: copying GraniteOS beside the existing OS\n");
+
+    const result = (api.checked(api.raw(.call, installer, protocol.pack(.install, 0), 6000)) catch return terminal.write("install: installer disconnected\n")).first;
+
+    try terminal.write(switch (result) {
+
+        protocol.denied => "install: administrators only\n",
+        protocol.missing => "install: no GPT disk with an EFI system partition and 64 MiB free\n",
+        protocol.empty => "install: the boot file is unavailable on this media\n",
+        protocol.invalid => "install: failed\n",
+        else => return terminal.print("install: installed to disk {d}; boot entry Boot{X:0>4}\n", .{ result & 0xff, result >> 8 }),
+
+    });
+
+}
+
+fn reboot(_: []const u8) Error!void {
+
+    try power(0, "reboot: restarting\n");
+
+}
+
+fn shutdown(_: []const u8) Error!void {
+
+    try power(1, "shutdown: powering off\n");
+
+}
+
+fn power(value: u56, message: []const u8) Error!void {
+
+    try terminal.write(message);
+
+    const result = try api.call(terminal.supervisor, protocol.pack(.power, value));
+    try terminal.write(if (result == protocol.denied) "power: log in first\n" else "power: not supported by this machine\n");
 
 }
 
@@ -472,6 +771,12 @@ fn ls(argument: []const u8) Error!void {
 
         for (entries[0..count]) |entry| {
 
+            var bits: [9]u8 = undefined;
+
+            for (&bits, 0..) |*bit, position| bit.* = if (entry.mode >> @intCast(8 - position) & 1 != 0) "rwx"[position % 3] else '-';
+
+            try terminal.print("{c}{s} {s:<10}", .{ @as(u8, if (entry.kind == .directory) 'd' else '-'), &bits, owner(entry.owner) });
+
             if (entry.kind == .directory) {
 
                 try terminal.print("{s:>12}  {s}/\n", .{ "-", entry.name });
@@ -487,6 +792,30 @@ fn ls(argument: []const u8) Error!void {
         index += @intCast(count);
 
     }
+
+}
+
+// Names the account owning a file, remembering the last answer since listings repeat owners.
+fn owner(user_id: u32) []const u8 {
+
+    if (user_id == 0) return "system";
+    if (owner_length != 0 and owner_id == user_id) return owner_name[0..owner_length];
+
+    var index: u56 = 0;
+
+    while (accounts.list(index) catch null) |account| : (index += 1) {
+
+        if (account.identity.user != user_id) continue;
+
+        owner_id = user_id;
+        owner_length = @min(account.name.len, owner_name.len);
+        @memcpy(owner_name[0..owner_length], account.name[0..owner_length]);
+
+        return owner_name[0..owner_length];
+
+    }
+
+    return "unknown";
 
 }
 
@@ -555,6 +884,16 @@ fn rm(argument: []const u8) Error!void {
 
 }
 
+fn chmod(argument: []const u8) Error!void {
+
+    const split = std.mem.indexOfScalar(u8, argument, ' ') orelse return error.Usage;
+    const bits = std.fmt.parseInt(u16, argument[0..split], 8) catch return error.Usage;
+
+    if (bits > 0o777) return error.Usage;
+    files.change(try resolve(std.mem.trimLeft(u8, argument[split..], " ")), bits, null) catch |err| return report("chmod", err);
+
+}
+
 fn volume(_: []const u8) Error!void {
 
     const usage = files.usage() catch |err| return report("volume", err);
@@ -563,7 +902,7 @@ fn volume(_: []const u8) Error!void {
 
 }
 
-fn report(name: []const u8, err: api.files.FileError) Error!void {
+fn report(name: []const u8, err: api.ServiceError) Error!void {
 
     const reason = switch (err) {
 
@@ -571,8 +910,9 @@ fn report(name: []const u8, err: api.files.FileError) Error!void {
         error.Exists => "already exists",
         error.Full => "volume full",
         error.Busy => "directory not empty",
-        error.Invalid => "invalid path or type",
-        else => "files service unavailable",
+        error.Denied => "permission denied",
+        error.Invalid => "invalid argument",
+        else => "service unavailable",
 
     };
 

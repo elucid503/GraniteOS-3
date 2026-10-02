@@ -111,12 +111,12 @@ pub fn convert(bytes: []const u8, stride: usize, version: u32, regions: []boot.R
         _ = std.math.add(u64, descriptor.physical_start, size) catch return MapError.InvalidMemoryMap;
         if (descriptor.physical_start % 4096 != 0) return MapError.InvalidMemoryMap;
 
-        const kind: boot.MemoryKind = if (descriptor.attribute.memory_runtime) .runtime else switch (descriptor.type) {
+        const kind: boot.MemoryKind = if (descriptor.type == .runtime_services_code) .runtime_code else if (descriptor.attribute.memory_runtime) .runtime else switch (descriptor.type) {
 
             .conventional_memory => .available,
             .loader_code, .loader_data => .loader,
             .boot_services_code, .boot_services_data => .firmware,
-            .runtime_services_code, .runtime_services_data => .runtime,
+            .runtime_services_data => .runtime,
             .acpi_reclaim_memory => .acpi,
             .persistent_memory => .persistent,
             .memory_mapped_io, .memory_mapped_io_port_space => .mmio,

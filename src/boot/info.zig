@@ -5,6 +5,7 @@ pub const MemoryKind = enum {
     loader,
     firmware,
     runtime,
+    runtime_code,
     acpi,
     persistent,
     mmio,
@@ -35,12 +36,16 @@ pub const Framebuffer = struct {
 
 pub const Info = struct {
 
-    version: u32 = 2,
+    version: u32 = 3,
     memory: []const Region,
     image: Region,
     stack: Region,
     framebuffer: ?Framebuffer,
     acpi_rsdp: ?u64,
     trampoline: u64 = 0,
+    runtime: u64 = 0,
+
+    /// The loader's own EFI file, kept so the installer can copy it.
+    efi: ?Region = null,
 
 };

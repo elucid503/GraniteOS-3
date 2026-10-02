@@ -82,6 +82,9 @@ pub const Space = struct {
 
             if (entry.* == 0) entry.* = address | flags | 0x81;
 
+            // ponytail: a 2 MiB page shared with firmware code stays executable as a whole; split to 4 KiB if that matters.
+            if (flags & nx == 0) entry.* &= ~nx;
+
         }
 
     }

@@ -1,5 +1,6 @@
 from pathlib import Path
 import struct
+import sys
 import uuid
 import zlib
 
@@ -11,8 +12,11 @@ DATA_SECTOR = RESERVED + 2 * FAT_SECTORS
 BLOCK = 2048
 IMAGE_BLOCK = 24
 DATA_SECTORS = 262144
+FOREIGN_DATA = 65536
+FOREIGN_FREE = 196608
 ESP = uuid.UUID("c12a7328-f81f-11d2-ba4b-00a0c93ec93b")
 GRANITE = uuid.UUID("c9fd8a72-4f14-4449-ae67-540225bb22a4")
+BASIC = uuid.UUID("ebd0a0a2-b9e5-4433-87c0-68b6b72699c7")
 
 
 def check_efi(data):
@@ -46,7 +50,7 @@ def directory_entry(name, attributes, cluster, size=0):
     return entry
 
 
-def fat_image(executable):
+def fat_image(executable, folder=b"BOOT       ", name=b"BOOTX64 EFI"):
     check_efi(executable)
 
     clusters = (len(executable) + SECTOR - 1) // SECTOR
@@ -96,14 +100,14 @@ def fat_image(executable):
     root = DATA_SECTOR * SECTOR
     image[root:root + 32] = directory_entry(b"GRANITEOS  ", 8, 0)
     image[root + 32:root + 64] = directory_entry(b"EFI        ", 16, 3)
-    for cluster, parent, name, child, size in [
-        (3, 0, b"BOOT       ", 4, 0),
-        (4, 3, b"BOOTX64 EFI", 5, len(executable)),
+    for cluster, parent, entry, child, size in [
+        (3, 0, folder, 4, 0),
+        (4, 3, name, 5, len(executable)),
     ]:
         start = (DATA_SECTOR + cluster - 2) * SECTOR
         image[start:start + 32] = directory_entry(b".          ", 16, cluster)
         image[start + 32:start + 64] = directory_entry(b"..         ", 16, parent)
-        image[start + 64:start + 96] = directory_entry(name, 16 if size == 0 else 32, child, size)
+        image[start + 64:start + 96] = directory_entry(entry, 16 if size == 0 else 32, child, size)
 
     start = (DATA_SECTOR + 3) * SECTOR
     image[start:start + len(executable)] = executable
@@ -248,6 +252,122 @@ def data_image():
     ])
 
 
+def stub():
+    """A PE header standing in for another OS's boot manager; firmware never runs it."""
+    executable = bytearray(1703)
+    executable[:2] = b"MZ"
+    struct.pack_into("<I", executable, 60, 128)
+    executable[128:132] = b"PE\0\0"
+    struct.pack_into("<HH", executable, 132, 0x8664, 0)
+    struct.pack_into("<H", executable, 152, 0x20B)
+    struct.pack_into("<H", executable, 220, 10)
+    return bytes(executable)
+
+
+def foreign_image():
+    """A disk another OS already owns: its ESP, a data partition, then room for GraniteOS."""
+    esp_start = 2048
+    data_start = esp_start + SECTORS
+    total = data_start + FOREIGN_DATA + FOREIGN_FREE + 34
+    image = gpt(total, uuid.UUID("7d1f0a52-93b4-4e2a-8c61-2f5b0e9d4a17"), [
+        (ESP, uuid.UUID("3c8e2b74-5a19-4d06-b7f2-91e4c0a6d358"), esp_start, data_start - 1, "EFI system partition"),
+        (BASIC, uuid.UUID("a4b9e6d1-0c72-4f3e-95a8-6d2e1b7c0f49"), data_start, data_start + FOREIGN_DATA - 1, "Basic data partition"),
+    ])
+
+    image[esp_start * SECTOR:data_start * SECTOR] = fat_image(stub(), b"MICROSOF   ", b"BOOTMGFWEFI")
+    for backup in (0, 6):
+        struct.pack_into("<I", image, (esp_start + backup) * SECTOR + 28, esp_start)
+
+    pattern = b"Existing OS data must survive GraniteOS. "
+    size = FOREIGN_DATA * SECTOR
+    image[data_start * SECTOR:(data_start + FOREIGN_DATA) * SECTOR] = (pattern * (size // len(pattern) + 1))[:size]
+    image[(data_start + FOREIGN_DATA) * SECTOR:(total - 34) * SECTOR] = b"\xa5" * (FOREIGN_FREE * SECTOR)
+    return image
+
+
+def partitions(disk):
+    """Map partition type to (first, last, unique) after checking both GPT copies' checksums."""
+    total = len(disk) // SECTOR
+    found = {}
+    for lba in (1, total - 1):
+        header = bytearray(disk[lba * SECTOR:lba * SECTOR + 92])
+        checksum, = struct.unpack_from("<I", header, 16)
+        struct.pack_into("<I", header, 16, 0)
+        table, count, size, crc = struct.unpack_from("<QIII", header, 72)
+        entries = disk[table * SECTOR:table * SECTOR + count * size]
+        if header[:8] != b"EFI PART" or zlib.crc32(header) != checksum or zlib.crc32(entries) != crc:
+            raise ValueError(f"GPT copy at {lba} is invalid")
+        copy = {}
+        for offset in range(0, len(entries), size):
+            kind = uuid.UUID(bytes_le=bytes(entries[offset:offset + 16]))
+            if kind.int:
+                first, last = struct.unpack_from("<QQ", entries, offset + 32)
+                copy[kind] = (first, last, uuid.UUID(bytes_le=bytes(entries[offset + 16:offset + 32])))
+        if found and copy != found:
+            raise ValueError("GPT copies disagree")
+        found = copy
+    return found
+
+
+def fat_files(volume):
+    """Read every file of a FAT32 volume into {path: bytes}."""
+    per = volume[13] * SECTOR
+    reserved, = struct.unpack_from("<H", volume, 14)
+    fat_size, = struct.unpack_from("<I", volume, 36)
+    root, = struct.unpack_from("<I", volume, 44)
+    fat = volume[reserved * SECTOR:(reserved + fat_size) * SECTOR]
+    data = (reserved + volume[16] * fat_size) * SECTOR
+
+    def chain(cluster):
+        while 2 <= cluster < 0x0FFFFFF8:
+            yield volume[data + (cluster - 2) * per:data + (cluster - 1) * per]
+            cluster = struct.unpack_from("<I", fat, cluster * 4)[0] & 0x0FFFFFFF
+
+    files = {}
+
+    def walk(cluster, prefix):
+        listing = b"".join(chain(cluster))
+        for offset in range(0, len(listing), 32):
+            entry = listing[offset:offset + 32]
+            if entry[0] == 0:
+                return
+            if entry[0] == 0xE5 or entry[11] in (0x0F, 0x08) or entry[:1] == b".":
+                continue
+            name = prefix + entry[:8].rstrip().decode() + ("." + entry[8:11].rstrip().decode() if entry[8:11].strip() else "")
+            high, = struct.unpack_from("<H", entry, 20)
+            low, size = struct.unpack_from("<HI", entry, 26)
+            if entry[11] & 0x10:
+                walk(high << 16 | low, name + "/")
+            else:
+                files[name] = b"".join(chain(high << 16 | low))[:size]
+
+    walk(root, "")
+    return files
+
+
+def verify_install(disk, efi):
+    """Check an installed disk: the other OS is untouched and GraniteOS sits in the old free space."""
+    before = foreign_image()
+    old, new = partitions(before), partitions(disk)
+    for kind in (ESP, BASIC):
+        if new[kind] != old[kind]:
+            raise ValueError(f"Partition {kind} moved")
+    first, last, _ = old[BASIC]
+    if disk[first * SECTOR:(last + 1) * SECTOR] != before[first * SECTOR:(last + 1) * SECTOR]:
+        raise ValueError("Existing OS data changed")
+    start, end, _ = new.get(GRANITE, (0, 0, None))
+    if start <= last or start % 2048 or end >= len(disk) // SECTOR - 33:
+        raise ValueError("GraniteOS partition is outside the free space")
+    first, last, _ = old[ESP]
+    files_before = fat_files(before[first * SECTOR:(last + 1) * SECTOR])
+    files_after = fat_files(disk[first * SECTOR:(last + 1) * SECTOR])
+    for path, contents in files_before.items():
+        if files_after.get(path) != contents:
+            raise ValueError(f"Existing ESP file {path} changed")
+    if files_after.get("EFI/GRANITE/BOOTX64.EFI") != efi:
+        raise ValueError("Installed loader is missing or differs")
+
+
 def build(efi, output):
     fat = fat_image(efi.read_bytes())
     output.mkdir(parents=True, exist_ok=True)
@@ -255,7 +375,13 @@ def build(efi, output):
     (output / "granite.iso").write_bytes(iso_image(fat))
     (output / "granite.img").write_bytes(disk_image(fat))
     (output / "data.img").write_bytes(data_image())
+    (output / "foreign.img").write_bytes(foreign_image())
 
 
 if __name__ == "__main__":
-    build(Path("zig-out/esp/EFI/BOOT/BOOTX64.EFI"), Path("zig-out"))
+    efi = Path("zig-out/esp/EFI/BOOT/BOOTX64.EFI")
+    if sys.argv[1:2] == ["verify"] and len(sys.argv) == 3:
+        verify_install(Path(sys.argv[2]).read_bytes(), efi.read_bytes())
+        print("Existing OS preserved; GraniteOS installed beside it.")
+    else:
+        build(efi, Path("zig-out"))

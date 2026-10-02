@@ -4,6 +4,8 @@ const policy = @import("policy.zig");
 const line = @import("../apps/line.zig");
 const protocol = @import("../api/protocol.zig");
 const volume = @import("volume.zig");
+const gpt = @import("gpt.zig");
+const fat = @import("fat.zig");
 
 test "restart policy backs off and stops after three replacements" {
 
@@ -236,5 +238,250 @@ test "volume persists fragmented files and directories and reclaims every block"
     try again.remove("/b");
     try std.testing.expectEqual(null, try again.entry("/", 0));
     try std.testing.expectEqual(initial.free, again.usage().free);
+
+}
+
+test "volume enforces owner and other permissions" {
+
+    const allocator = std.testing.allocator;
+    const disk = Memory{
+
+        .bytes = try allocator.alloc(u8, 2 << 20),
+
+    };
+    defer allocator.free(disk.bytes);
+    @memset(disk.bytes, 0);
+
+    const mounted = try allocator.create(volume.Volume(Memory));
+    defer allocator.destroy(mounted);
+
+    _ = try mounted.mount(disk, .{
+
+        .first = 0,
+        .sectors = disk.bytes.len / 512,
+
+    });
+    try mounted.create("/home", .directory);
+    try mounted.create("/home/alice", .directory);
+    try mounted.change("/home/alice", 0o700, 1000);
+
+    mounted.user = 1000;
+    try mounted.create("/home/alice/note", .file);
+    try mounted.write("/home/alice/note", 0, "private");
+    try std.testing.expectEqual(1000, (try mounted.entry("/home/alice", 0)).?.owner);
+    try std.testing.expectError(error.Denied, mounted.create("/home/bob", .directory));
+    try std.testing.expectError(error.Denied, mounted.change("/home/alice", 0o755, 1001));
+
+    var out: [16]u8 = undefined;
+
+    mounted.user = 1001;
+    try std.testing.expectError(error.Denied, mounted.read("/home/alice/note", 0, &out));
+    try std.testing.expectError(error.Denied, mounted.entry("/home/alice", 0));
+    try std.testing.expectError(error.Denied, mounted.remove("/home/alice/note"));
+    try std.testing.expectError(error.Denied, mounted.change("/home/alice", 0o777, null));
+
+    mounted.user = 1000;
+    try mounted.change("/home/alice", 0o755, null);
+
+    mounted.user = 1001;
+    try std.testing.expectEqual(7, try mounted.read("/home/alice/note", 0, &out));
+    try std.testing.expectError(error.Denied, mounted.write("/home/alice/note", 0, "x"));
+    try std.testing.expectError(error.Denied, mounted.create("/home/alice/note", .file));
+    try std.testing.expectError(error.Denied, mounted.create("/home/alice/other", .file));
+
+    mounted.user = volume.system;
+    try mounted.remove("/home/alice/note");
+
+}
+
+test "GPT edit fills the largest aligned gap and keeps both tables valid" {
+
+    const allocator = std.testing.allocator;
+    const sectors = 65536;
+    const disk = Memory{
+
+        .bytes = try allocator.alloc(u8, sectors * 512),
+
+    };
+    defer allocator.free(disk.bytes);
+    @memset(disk.bytes, 0);
+
+    const header = disk.bytes[512..1024];
+    const entries = disk.bytes[1024..][0 .. 128 * 128];
+
+    @memcpy(header[0..8], "EFI PART");
+    std.mem.writeInt(u32, header[12..16], 92, .little);
+    std.mem.writeInt(u64, header[24..32], 1, .little);
+    std.mem.writeInt(u64, header[32..40], sectors - 1, .little);
+    std.mem.writeInt(u64, header[40..48], 34, .little);
+    std.mem.writeInt(u64, header[48..56], sectors - 34, .little);
+    std.mem.writeInt(u64, header[72..80], 2, .little);
+    std.mem.writeInt(u32, header[80..84], 128, .little);
+    std.mem.writeInt(u32, header[84..88], 128, .little);
+
+    for ([_][3]u64{ .{ 0, 2048, 4095 }, .{ 1, 4096, 20479 }, .{ 2, 40960, 49151 } }) |part| {
+
+        const entry = entries[part[0] * 128 ..][0..128];
+
+        entry[0..16].* = if (part[0] == 0) gpt.esp else [_]u8{0xaa} ** 16;
+        std.mem.writeInt(u64, entry[32..40], part[1], .little);
+        std.mem.writeInt(u64, entry[40..48], part[2], .little);
+
+    }
+
+    std.mem.writeInt(u32, header[88..92], std.hash.Crc32.hash(entries), .little);
+    std.mem.writeInt(u32, header[16..20], std.hash.Crc32.hash(header[0..92]), .little);
+    @memset(disk.bytes[4096 * 512 .. 20480 * 512], 0x5a);
+
+    const table = try allocator.create(gpt.Table);
+    defer allocator.destroy(table);
+
+    try std.testing.expect(try table.read(disk, sectors));
+    try std.testing.expectEqual(2048, table.find(gpt.esp).?.first);
+
+    const free = table.gap();
+
+    try std.testing.expectEqual(20480, free.first);
+    try std.testing.expectEqual(20480, free.sectors);
+    try table.add(disk, volume.partition, [_]u8{1} ** 16, free, "GraniteOS Data");
+
+    try std.testing.expect(try table.read(disk, sectors));
+    try std.testing.expectEqual(4, table.find(volume.partition).?.number);
+    try std.testing.expectEqual(40959, table.find(volume.partition).?.last);
+    try std.testing.expect(std.mem.allEqual(u8, disk.bytes[4096 * 512 .. 20480 * 512], 0x5a));
+
+    var backup = disk.bytes[(sectors - 1) * 512 ..][0..512].*;
+    const checksum = std.mem.readInt(u32, backup[16..20], .little);
+
+    try std.testing.expectEqual(1, std.mem.readInt(u64, backup[32..40], .little));
+    try std.testing.expectEqual(sectors - 33, std.mem.readInt(u64, backup[72..80], .little));
+    try std.testing.expectEqualSlices(u8, entries, disk.bytes[(sectors - 33) * 512 ..][0 .. 128 * 128]);
+    @memset(backup[16..20], 0);
+    try std.testing.expectEqual(checksum, std.hash.Crc32.hash(backup[0..92]));
+
+    header[40] ^= 1;
+    try std.testing.expect(!try table.read(disk, sectors));
+
+}
+
+test "FAT32 writer fills only free clusters and survives fragmentation and rewrites" {
+
+    const allocator = std.testing.allocator;
+    const base = 64;
+    const total = 4096;
+    const disk = Memory{
+
+        .bytes = try allocator.alloc(u8, (base + total) * 512),
+
+    };
+    defer allocator.free(disk.bytes);
+    @memset(disk.bytes, 0);
+
+    const boot = disk.bytes[base * 512 ..][0..512];
+    const info = disk.bytes[(base + 1) * 512 ..][0..512];
+
+    std.mem.writeInt(u16, boot[11..13], 512, .little);
+    boot[13] = 1;
+    std.mem.writeInt(u16, boot[14..16], 32, .little);
+    boot[16] = 2;
+    std.mem.writeInt(u32, boot[32..36], total, .little);
+    std.mem.writeInt(u32, boot[36..40], 32, .little);
+    std.mem.writeInt(u32, boot[44..48], 2, .little);
+    std.mem.writeInt(u16, boot[48..50], 1, .little);
+    boot[510] = 0x55;
+    boot[511] = 0xaa;
+    std.mem.writeInt(u32, info[0..4], 0x41615252, .little);
+    std.mem.writeInt(u32, info[484..488], 0x61417272, .little);
+    std.mem.writeInt(u32, info[488..492], 1234, .little);
+
+    // Clusters 0-4 are reserved, root, and an existing two-cluster file; every third from 30 is taken.
+    for (0..2) |copy| {
+
+        const table = disk.bytes[(base + 32 + copy * 32) * 512 ..][0..512];
+
+        for ([_]u32{ 0x0ffffff8, 0x0fffffff, 0x0fffffff, 4, 0x0fffffff }, 0..) |value, index| std.mem.writeInt(u32, table[index * 4 ..][0..4], value, .little);
+
+        var cluster: usize = 30;
+
+        while (cluster < 90) : (cluster += 3) std.mem.writeInt(u32, table[cluster * 4 ..][0..4], 0x0fffffff, .little);
+
+    }
+
+    @memset(disk.bytes[(base + 97) * 512 ..][0 .. 2 * 512], 0x77);
+
+    const esp = try allocator.create(fat.Fat(Memory));
+    defer allocator.destroy(esp);
+
+    try std.testing.expect(try esp.mount(disk, base));
+
+    const efi = try esp.directory(esp.root, "EFI        ");
+
+    try std.testing.expectEqual(efi, try esp.directory(esp.root, "EFI        "));
+
+    const home = try esp.directory(efi, "GRANITE    ");
+
+    // Twenty more entries overflow the one-cluster root directory.
+    for (0..20) |index| {
+
+        var name = "DIR00      ".*;
+
+        name[3] = '0' + @as(u8, @intCast(index / 10));
+        name[4] = '0' + @as(u8, @intCast(index % 10));
+        _ = try esp.directory(esp.root, &name);
+
+    }
+
+    var data: [9000]u8 = undefined;
+    var out: [9000]u8 = undefined;
+
+    for (&data, 0..) |*byte, index| byte.* = @truncate(index * 7 + index / 251);
+
+    try esp.write(home, "BOOTX64 EFI", &data);
+    try std.testing.expectEqualSlices(u8, &data, out[0..try fatFile(disk.bytes, base, home, "BOOTX64 EFI", &out)]);
+    try esp.write(home, "BOOTX64 EFI", data[0..700]);
+    try std.testing.expectEqualSlices(u8, data[0..700], out[0..try fatFile(disk.bytes, base, home, "BOOTX64 EFI", &out)]);
+    try std.testing.expectEqual(0, try fatFile(disk.bytes, base, esp.root, "DIR19      ", &out));
+
+    try std.testing.expect(std.mem.allEqual(u8, disk.bytes[(base + 97) * 512 ..][0 .. 2 * 512], 0x77));
+    try std.testing.expectEqualSlices(u8, disk.bytes[(base + 32) * 512 ..][0 .. 32 * 512], disk.bytes[(base + 64) * 512 ..][0 .. 32 * 512]);
+    try std.testing.expectEqual(0xffffffff, std.mem.readInt(u32, info[488..492], .little));
+
+}
+
+/// Reads `name` from a test volume with one-sector clusters, its FAT at sector 32 and data at 96.
+fn fatFile(bytes: []const u8, base: usize, directory: u32, name: []const u8, out: []u8) !usize {
+
+    const table = bytes[(base + 32) * 512 ..];
+    var cluster = directory;
+
+    while (cluster < 0x0ffffff8) : (cluster = std.mem.readInt(u32, table[cluster * 4 ..][0..4], .little) & 0x0fffffff) {
+
+        const sector = bytes[(base + 96 + cluster - 2) * 512 ..][0..512];
+
+        for (0..16) |index| {
+
+            const entry = sector[index * 32 ..][0..32];
+            if (!std.mem.eql(u8, entry[0..11], name)) continue;
+
+            var file = @as(u32, std.mem.readInt(u16, entry[20..22], .little)) << 16 | std.mem.readInt(u16, entry[26..28], .little);
+            const size = std.mem.readInt(u32, entry[28..32], .little);
+            var done: usize = 0;
+
+            while (done < size) : (file = std.mem.readInt(u32, table[file * 4 ..][0..4], .little) & 0x0fffffff) {
+
+                const count = @min(512, size - done);
+
+                @memcpy(out[done..][0..count], bytes[(base + 96 + file - 2) * 512 ..][0..count]);
+                done += count;
+
+            }
+
+            return size;
+
+        }
+
+    }
+
+    return error.Missing;
 
 }

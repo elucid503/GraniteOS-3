@@ -50,6 +50,8 @@ pub fn prepare(log: Log) !*const boot.Info {
         .framebuffer = try graphics.capture(services),
         .acpi_rsdp = findAcpi(table),
         .trampoline = @intFromPtr(trampoline.ptr),
+        .runtime = @intFromPtr(table.runtime_services),
+        .efi = copy(services, loaded),
 
     };
 
@@ -71,6 +73,52 @@ pub fn prepare(log: Log) !*const boot.Info {
     log.line("firmware released");
 
     return info;
+
+}
+
+// Reads the loader's own file for the installer; null when the boot volume cannot provide it.
+fn copy(services: *uefi.tables.BootServices, loaded: *const uefi.protocol.LoadedImage) ?boot.Region {
+
+    const device = loaded.device_handle orelse return null;
+    const filesystem = (services.handleProtocol(uefi.protocol.SimpleFileSystem, device) catch return null) orelse return null;
+    const volume = filesystem.openVolume() catch return null;
+
+    var path = std.mem.zeroes([256:0]u16);
+    var node: [*]const u8 = @ptrCast(loaded.file_path);
+
+    // ponytail: takes the first file-path node; firmware that splits the path across nodes needs concatenation.
+    while (node[0] != 0x7f) {
+
+        const length = std.mem.readInt(u16, node[2..4], .little);
+
+        if (length < 4) return null;
+        if (node[0] == 4 and node[1] == 4) {
+
+            if (length < 6 or (length - 4) / 2 > path.len) return null;
+            @memcpy(std.mem.sliceAsBytes(path[0 .. (length - 4) / 2]), node[4..length]);
+            break;
+
+        }
+
+        node += length;
+
+    } else return null;
+
+    const file = volume.open(&path, .read, .{}) catch return null;
+    var info: [512]u8 align(8) = undefined;
+    const size = (file.getInfo(.file, &info) catch return null).file_size;
+    const pages = services.allocatePages(.any, .loader_data, (size + 4095) / 4096) catch return null;
+    const bytes = std.mem.sliceAsBytes(pages)[0..size];
+
+    if ((file.read(bytes) catch return null) != size) return null;
+
+    return .{
+
+        .base = @intFromPtr(pages.ptr),
+        .size = size,
+        .kind = .loader,
+
+    };
 
 }
 

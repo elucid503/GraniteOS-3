@@ -43,6 +43,9 @@ pub const Line = struct {
     draft: [capacity]u8 = undefined,
     draft_len: usize = 0,
 
+    /// Cleared for names and passwords, which never enter history.
+    record: bool = true,
+
     pub fn text(self: *const Line) []const u8 {
 
         return self.bytes[0..self.len];
@@ -168,7 +171,7 @@ pub const Line = struct {
         const newest = self.recalled(1);
         const repeated = newest != null and std.mem.eql(u8, newest.?, self.text());
 
-        if (self.len != 0 and !repeated) {
+        if (self.len != 0 and !repeated and self.record) {
 
             const slot = self.total % history_limit;
             @memcpy(self.history[slot][0..self.len], self.text());

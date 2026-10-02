@@ -34,6 +34,9 @@ pub const Call = enum(u64) {
     dma = 20,
     fetch = 21,
     store = 22,
+    shutdown = 23,
+    assign = 24,
+    variable = 25,
     _,
 
 };
@@ -59,6 +62,8 @@ pub const Image = enum(u64) {
     client,
     storage,
     files,
+    accounts,
+    install,
 
 };
 
@@ -76,10 +81,33 @@ pub const Permission = enum(u32) {
     time,
     ports,
     mmio,
-    reboot,
+    power,
     diagnostics,
     management,
     dma,
+    accounts,
+    firmware,
+
+};
+
+/// Who a process acts for; the kernel attaches the sender's identity to every message as `fifth`.
+pub const Identity = packed struct(u64) {
+
+    user: u32,
+    admin: bool = false,
+    reserved: u31 = 0,
+
+};
+
+pub const system = Identity{
+
+    .user = 0,
+
+};
+
+pub const nobody = Identity{
+
+    .user = 0xffffffff,
 
 };
 

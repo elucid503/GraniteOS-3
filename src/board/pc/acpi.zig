@@ -68,7 +68,39 @@ pub const Acpi = struct {
 
     }
 
+    pub fn load(self: Acpi, address: u64) AcpiError![]const u8 {
+
+        return table(self.regions, address);
+
+    }
+
 };
+
+/// Reads SLP_TYPa and SLP_TYPb from the DSDT's `_S5_` package without a full AML interpreter.
+pub fn sleepTypes(dsdt: []const u8) ?[2]u8 {
+
+    const name = std.mem.indexOf(u8, dsdt, "_S5_") orelse return null;
+
+    // NameOp, optionally with a root prefix, then PackageOp, PkgLength, and NumElements.
+    if (name == 0 or (dsdt[name - 1] != 0x08 and (name < 2 or dsdt[name - 1] != 0x5c or dsdt[name - 2] != 0x08))) return null;
+    if (name + 6 >= dsdt.len or dsdt[name + 4] != 0x12) return null;
+
+    var index = name + 7 + (dsdt[name + 5] >> 6);
+    var types: [2]u8 = undefined;
+
+    for (&types) |*kind| {
+
+        if (index < dsdt.len and dsdt[index] == 0x0a) index += 1;
+        if (index >= dsdt.len) return null;
+
+        kind.* = dsdt[index];
+        index += 1;
+
+    }
+
+    return types;
+
+}
 
 pub fn validateMadt(bytes: []const u8) AcpiError!void {
 

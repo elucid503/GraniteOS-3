@@ -3,7 +3,7 @@ const std = @import("std");
 const api = @import("root.zig");
 
 const protocol = api.protocol;
-pub const FileError = api.ApiError || error{ Exists, Full };
+pub const FileError = api.ServiceError;
 
 pub const Kind = enum(u8) {
 
@@ -17,6 +17,8 @@ pub const Entry = struct {
 
     kind: Kind,
     size: u64,
+    mode: u16,
+    owner: u32,
     name: []const u8,
 
 };
@@ -52,6 +54,13 @@ pub const Files = struct {
 
     }
 
+    /// Sets permission bits; only system services may pass an `owner` other than null.
+    pub fn change(self: *Files, path: []const u8, mode: u16, owner: ?u32) FileError!void {
+
+        _ = try self.request(.change, @as(u56, owner orelse api.abi.nobody.user) << 16 | mode, path, 0);
+
+    }
+
     /// Reads up to `limit` bytes at `offset`; the bytes live in `window` until the next call.
     pub fn read(self: *Files, path: []const u8, offset: u56, limit: usize) FileError![]const u8 {
 
@@ -78,16 +87,18 @@ pub const Files = struct {
 
         for (0..@min(count, out.len)) |entry| {
 
-            const length = self.window[offset + 9];
+            const length = self.window[offset + 15];
 
             out[entry] = .{
 
                 .kind = @enumFromInt(self.window[offset]),
                 .size = std.mem.readInt(u64, self.window[offset + 1 ..][0..8], .little),
-                .name = self.window[offset + 10 ..][0..length],
+                .mode = std.mem.readInt(u16, self.window[offset + 9 ..][0..2], .little),
+                .owner = std.mem.readInt(u32, self.window[offset + 11 ..][0..4], .little),
+                .name = self.window[offset + 16 ..][0..length],
 
             };
-            offset += 10 + length;
+            offset += 16 + length;
 
         }
 
@@ -116,34 +127,7 @@ pub const Files = struct {
         @memcpy(self.window[0..path.len], path);
         self.window[path.len] = 0;
 
-        // A restarted service has a new identity, so a stale endpoint earns one fresh lookup.
-        for (0..2) |_| {
-
-            if (self.endpoint == 0) self.endpoint = try api.lookup(0, .files);
-
-            const result = api.exchange(self.endpoint, protocol.pack(operation, value), self.window[0 .. path.len + 1 + payload]) catch |err| {
-
-                self.endpoint = 0;
-                if (err == error.Missing or err == error.Denied) continue;
-
-                return err;
-
-            };
-
-            return switch (result) {
-
-                protocol.missing => error.Missing,
-                protocol.exists => error.Exists,
-                protocol.full => error.Full,
-                protocol.busy => error.Busy,
-                protocol.invalid => error.Invalid,
-                else => result,
-
-            };
-
-        }
-
-        return error.Missing;
+        return api.query(&self.endpoint, .files, protocol.pack(operation, value), self.window[0 .. path.len + 1 + payload]);
 
     }
 

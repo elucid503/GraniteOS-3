@@ -32,11 +32,11 @@
 - [ ] SATA and VMware storage support.
 - [x] Filesystem selection and persistent files/directories.
 - [x] File and volume sizes without arbitrary fixed limits.
-- [ ] Multiple accounts, login, and administrator privileges.
-- [ ] Private home directories and access permissions.
-- [ ] Logout and screen locking.
-- [ ] Installed boot alongside an existing OS, preserving its data.
-- [ ] Shutdown and reboot.
+- [x] Multiple accounts, login, and administrator privileges.
+- [x] Private home directories and access permissions.
+- [x] Logout and screen locking (terminal; graphical locking comes with the desktop).
+- [x] Installed boot alongside an existing OS, preserving its data.
+- [x] Shutdown and reboot.
 
 ## Milestone 5: Graphics and Desktop
 

@@ -47,6 +47,9 @@ pub var core_count: usize = 0;
 var reset_port: u16 = 0;
 var reset_value: u8 = 0;
 
+var sleep_ports = [2]u16{ 0, 0 };
+var sleep_types = [2]u8{ 0, 0 };
+
 extern fn idle() callconv(.c) noreturn;
 
 extern const trampoline_start: u8;
@@ -94,6 +97,22 @@ pub fn prepare(info: *const boot.Info, frames: *memory.Frames, log: Log) !void {
 
         }
 
+        if (fadt.len >= 116) {
+
+            const dsdt = if (fadt.len >= 148 and acpi.read(u64, fadt, 140) != 0) acpi.read(u64, fadt, 140) else acpi.read(u32, fadt, 40);
+            const types = if (firmware.load(dsdt)) |bytes| acpi.sleepTypes(bytes) else |_| null;
+            const first = acpi.read(u32, fadt, 64);
+            const second = acpi.read(u32, fadt, 68);
+
+            if (types != null and first != 0 and first <= 65535 and second <= 65535) {
+
+                sleep_ports = .{ @intCast(first), @intCast(second) };
+                sleep_types = types.?;
+
+            }
+
+        }
+
     }
 
     kernel = try paging.Space.init(frames);
@@ -104,6 +123,8 @@ pub fn prepare(info: *const boot.Info, frames: *memory.Frames, log: Log) !void {
         switch (region.kind) {
 
             .available, .loader, .firmware, .runtime, .acpi, .persistent => try kernel.identity(@intCast(region.base), @intCast(region.size), paging.writable | paging.nx),
+            // Runtime images keep their data inside code-typed pages, so firmware calls need both.
+            .runtime_code => try kernel.identity(@intCast(region.base), @intCast(region.size), paging.writable),
             else => {
 
             },
@@ -299,6 +320,19 @@ fn relative(symbol: *const u8) usize {
 fn patch(comptime T: type, blob: []u8, symbol: *const u8, extra: usize, value: T) void {
 
     std.mem.writeInt(T, blob[relative(symbol) + extra ..][0..@sizeOf(T)], value, .little);
+
+}
+
+/// Enters ACPI S5; returns only when the firmware described no usable sleep state.
+pub fn shutdown() void {
+
+    for (sleep_ports, sleep_types) |port, kind| {
+
+        if (port != 0) cpu.out16(port, cpu.in16(port) & ~@as(u16, 0x3c00) | @as(u16, kind & 7) << 10 | 1 << 13);
+
+    }
+
+    if (sleep_ports[0] != 0) apic.delay(1000);
 
 }
 

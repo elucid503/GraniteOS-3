@@ -25,6 +25,33 @@ pub inline fn in(port: u16) u8 {
 
 }
 
+pub inline fn out16(port: u16, value: u16) void {
+
+    asm volatile ("outw %[value], %[port]" // Write two bytes to an I/O port.
+        :
+        : [value] "{ax}" (value),
+          [port] "{dx}" (port),
+        : .{
+
+            .memory = true,
+
+        });
+
+}
+
+pub inline fn in16(port: u16) u16 {
+
+    return asm volatile ("inw %[port], %[value]" // Read two bytes from an I/O port.
+        : [value] "={ax}" (-> u16),
+        : [port] "{dx}" (port),
+        : .{
+
+            .memory = true,
+
+        });
+
+}
+
 pub inline fn out32(port: u16, value: u32) void {
 
     asm volatile ("outl %[value], %[port]" // Write four bytes to an I/O port.

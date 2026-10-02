@@ -250,13 +250,14 @@ fn task(id: u64) process.Process {
     value.ticket = 0;
     value.deadline = 0;
     value.length = 0;
+    value.identity = abi.nobody;
     value.policy = .{
 
         .layer = .service,
         .length = abi.permission_count,
         .permissions = .{
 
-            .ipc, .memory, .time, .ports, .mmio, .reboot, .diagnostics, .management, .dma
+            .ipc, .memory, .time, .ports, .mmio, .power, .diagnostics, .management, .dma, .accounts, .firmware
 
         },
 
@@ -289,7 +290,7 @@ test "permission arrays distinguish services and deny undeclared authority" {
     }));
     try std.testing.expectError(error.Denied, permission.Policy.init(.application, &.{
 
-        .reboot
+        .power
 
     }));
     try std.testing.expectError(error.Invalid, permission.Policy.init(.service, &.{
@@ -445,12 +446,19 @@ test "IPC rendezvous preserves sender identity and wakes blocked peers" {
     };
 
     sender.capabilities = &grant;
+    sender.identity = .{
+
+        .user = 1000,
+        .admin = true,
+
+    };
     try ipc.send(&sender, &sender, 2, 123);
     try std.testing.expectEqual(.sending, sender.state);
     ipc.receive(&sender, &receiver);
     try std.testing.expectEqual(.ready, sender.state);
     try std.testing.expectEqual(1, receiver.context.request().first);
     try std.testing.expectEqual(123, receiver.context.request().second);
+    try std.testing.expectEqual(sender.identity, @as(abi.Identity, @bitCast(receiver.context.request().fifth)));
     ipc.receive(&sender, &receiver);
     try std.testing.expectEqual(.receiving, receiver.state);
     try ipc.send(&sender, &sender, 2, 456);
@@ -536,6 +544,15 @@ test "MADT parser rejects nonadvancing truncated and corrupted records" {
     fixChecksum(&bytes);
     bytes[10] = 1;
     try std.testing.expectError(error.InvalidAcpi, acpi.validateMadt(&bytes));
+
+}
+
+test "S5 parser reads both sleep types across package encodings" {
+
+    try std.testing.expectEqual([2]u8{ 5, 7 }, acpi.sleepTypes("junk\x08_S5_\x12\x0a\x04\x0a\x05\x0a\x07\x00\x00").?);
+    try std.testing.expectEqual([2]u8{ 0, 1 }, acpi.sleepTypes("\x08\\_S5_\x12\x40\x01\x04\x00\x01\x00\x00").?);
+    try std.testing.expectEqual(null, acpi.sleepTypes("\x10_S5_\x12\x06\x04\x00\x00"));
+    try std.testing.expectEqual(null, acpi.sleepTypes("\x08_S5_\x12\x06"));
 
 }
 

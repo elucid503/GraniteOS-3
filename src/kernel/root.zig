@@ -23,12 +23,16 @@ var next_id: u64 = 1;
 var framebuffer: ?boot.Framebuffer = null;
 pub var primary: u32 = 0;
 pub var ticks: u64 = 0;
+pub var runtime: u64 = 0;
+pub var efi: ?boot.Region = null;
 
 pub fn start(info: *const boot.Info, output: Log) !noreturn {
 
     log = output;
     framebuffer = info.framebuffer;
-    if (info.version != 2 or info.memory.len == 0) return error.InvalidBootInfo;
+    runtime = info.runtime;
+    efi = info.efi;
+    if (info.version != 3 or info.memory.len == 0) return error.InvalidBootInfo;
 
     log.line("start");
     log.hex("image base", info.image.base);

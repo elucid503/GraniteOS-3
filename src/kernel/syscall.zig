@@ -6,6 +6,7 @@ const process = @import("process.zig");
 const ipc = @import("ipc.zig");
 const abi = @import("abi.zig");
 const service = @import("service.zig");
+const firmware = @import("../boot/uefi/variable.zig");
 
 const paging = arch.paging;
 const CallError = paging.MapError || ipc.IpcError || @import("elf.zig").LoadError || error{ Denied, Invalid, Busy, ProcessIdsExhausted, InvalidProcessor, NoDevice };
@@ -71,7 +72,7 @@ fn invoke(task: *process.Process, ticks: u64, frame: *abi.Request) CallError!voi
 
             var bytes: [256]u8 = undefined;
 
-            try copyFrom(task, frame.first, bytes[0..frame.second]);
+            try copyUser(task, frame.first, bytes[0..frame.second], false);
             root.log.output(bytes[0..frame.second]);
 
         },
@@ -120,9 +121,17 @@ fn invoke(task: *process.Process, ticks: u64, frame: *abi.Request) CallError!voi
         },
         .reboot => {
 
-            if (!task.permits(.reboot, 0, 1)) return error.Denied;
+            if (!task.permits(.power, 0, 1)) return error.Denied;
 
             arch.machine.reboot();
+
+        },
+        .shutdown => {
+
+            if (!task.permits(.power, 0, 1)) return error.Denied;
+
+            arch.machine.shutdown();
+            return error.NoDevice;
 
         },
         .ticks => {
@@ -223,6 +232,36 @@ fn invoke(task: *process.Process, ticks: u64, frame: *abi.Request) CallError!voi
             if (number == @intFromEnum(abi.Call.fetch)) try copy(client, remote, task, frame.fourth, frame.fifth) else try copy(task, frame.fourth, client, remote, frame.fifth);
 
         },
+        .assign => {
+
+            if (!task.policy.permits(.accounts)) return error.Denied;
+            const client = ipc.find(root.processes, frame.first) orelse return error.NoProcess;
+            const identity: abi.Identity = @bitCast(frame.third);
+
+            // Only a caller blocked on this service can be re-identified, and never as a service.
+            if (client.state != .replying or client.destination != task.id or client.ticket != frame.second) return error.Denied;
+            if (client.policy.layer != .application or identity.user == abi.system.user or identity.reserved != 0) return error.Invalid;
+            client.identity = identity;
+
+        },
+        .variable => {
+
+            if (!task.policy.permits(.firmware)) return error.Denied;
+            if (frame.second == 0 or frame.second > 64 or frame.fourth > 4096 or frame.fifth > 1) return error.Invalid;
+
+            var name = std.mem.zeroes([65:0]u16);
+            var data: [4096]u8 = undefined;
+            const bytes = data[0..frame.fourth];
+
+            try copyUser(task, frame.first, std.mem.sliceAsBytes(name[0..frame.second]), false);
+            if (frame.fifth == 1) try copyUser(task, frame.third, bytes, false);
+
+            const size = try firmware.access(root.runtime, &name, bytes, frame.fifth == 1);
+
+            if (frame.fifth == 0) try copyUser(task, frame.third, bytes[0..size], true);
+            frame.first = size;
+
+        },
         else => return error.Invalid,
 
     }
@@ -246,7 +285,7 @@ fn copy(source: *process.Process, from: u64, target: *process.Process, to: u64, 
 
 }
 
-fn copyFrom(task: *process.Process, address: u64, bytes: []u8) !void {
+fn copyUser(task: *process.Process, address: u64, bytes: []u8, write: bool) !void {
 
     if (address < paging.user_base or address >= paging.user_end or bytes.len > paging.user_end - address) return error.Invalid;
 
@@ -254,10 +293,11 @@ fn copyFrom(task: *process.Process, address: u64, bytes: []u8) !void {
 
     while (offset < bytes.len) {
 
-        const physical = try task.space.translate(address + offset, false);
+        const physical = try task.space.translate(address + offset, write);
         const size = @min(bytes.len - offset, 4096 - (physical & 4095));
+        const page = @as([*]u8, @ptrFromInt(physical))[0..size];
 
-        @memcpy(bytes[offset..][0..size], @as([*]const u8, @ptrFromInt(physical))[0..size]);
+        if (write) @memcpy(page, bytes[offset..][0..size]) else @memcpy(bytes[offset..][0..size], page);
         offset += size;
 
     }

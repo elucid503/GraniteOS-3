@@ -17,3 +17,12 @@ shell acceptance checks. Both accept `--media disk`, `--cpus N`, and
 Each VM gets a second SATA disk holding the GraniteOS volume. `run` keeps it
 between sessions (`zig-out/vm/run-<media>/data.img`); `test` starts it blank
 and checks that files survive a power cycle.
+
+A blank volume has no accounts: the shell runs setup as `nobody`, and
+`useradd NAME` creates the first administrator. From then on the shell asks
+for a login. `install` (administrators, or anyone during setup) copies
+GraniteOS onto the first GPT disk with a FAT32 EFI system partition and at
+least 64 MiB of unpartitioned space, adds a GraniteOS partition there, and
+puts a GraniteOS entry first in the firmware boot order; existing partitions
+are never moved or resized. `test` also installs onto a disk holding a
+stand-in OS and boots it without the live media.

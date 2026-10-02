@@ -5,7 +5,7 @@ const options = @import("options");
 
 const protocol = api.protocol;
 pub const panic = api.panic;
-var entries = [_]policy.Entry{ .{ }, .{ }, .{ }, .{ }, .{ }, .{ } };
+var entries = [_]policy.Entry{.{}} ** @typeInfo(api.abi.Image).@"enum".fields.len;
 
 var started = false;
 var test_finished = false;
@@ -58,7 +58,7 @@ fn maintain() void {
 
     for ([_]api.abi.Image{
 
-        .serial, .helper, .storage, .files, .shell, .client
+        .serial, .helper, .storage, .files, .accounts, .install, .shell, .client
 
     }) |image| {
 
@@ -120,7 +120,6 @@ fn handle(request: api.Request) u64 {
 
     const operation = protocol.operation(request.second);
     const value = protocol.value(request.second);
-    const shell = entries[@intFromEnum(api.abi.Image.shell)].id;
     const client = entries[@intFromEnum(api.abi.Image.client)].id;
 
     switch (operation) {
@@ -141,7 +140,7 @@ fn handle(request: api.Request) u64 {
 
         .crash, .restart => {
 
-            if (request.first != shell and (!options.self_test or request.first != client)) return protocol.invalid;
+            if (!api.sender(request).admin and (!options.self_test or request.first != client)) return protocol.invalid;
             if (value >= entries.len or value == @intFromEnum(api.abi.Image.shell) or value == @intFromEnum(api.abi.Image.client)) return protocol.invalid;
 
             const peer = entries[value].id;
@@ -156,6 +155,16 @@ fn handle(request: api.Request) u64 {
             };
 
             return protocol.invalid;
+
+        },
+
+        .power => {
+
+            if (api.sender(request).user == api.abi.nobody.user) return protocol.denied;
+
+            const result = api.raw(if (value == 1) .shutdown else .reboot, 0, 0, 0);
+
+            return if (result.number == 0) 0 else protocol.invalid;
 
         },
 

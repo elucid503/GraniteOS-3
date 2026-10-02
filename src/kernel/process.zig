@@ -22,7 +22,7 @@ pub const Right = enum {
     send,
     port,
     mmio,
-    reboot,
+    power,
     log,
     manage,
 
@@ -44,6 +44,7 @@ pub const Process = struct {
     id: u64,
     state: State = .ready,
     policy: permission.Policy = permission.application,
+    identity: abi.Identity = abi.nobody,
     environment: *abi.Environment,
 
     space: paging.Space,
@@ -185,6 +186,7 @@ pub const Process = struct {
     pub fn configure(self: *Process, layer: abi.Layer, permissions: []const abi.Permission) permission.PolicyError!void {
 
         self.policy = try permission.Policy.init(layer, permissions);
+        self.identity = if (layer == .service) abi.system else abi.nobody;
         self.publish();
 
     }
@@ -229,7 +231,7 @@ fn required(right: Right) abi.Permission {
         .send => .ipc,
         .port => .ports,
         .mmio => .mmio,
-        .reboot => .reboot,
+        .power => .power,
         .log => .diagnostics,
         .manage => .management,
 

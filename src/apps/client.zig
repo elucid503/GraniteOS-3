@@ -12,7 +12,7 @@ pub export fn app_main(_: usize, parent: usize, environment: *const api.abi.Envi
     forged.length = api.abi.permission_count;
     forged.permissions = .{
 
-        .ipc, .memory, .time, .ports, .mmio, .reboot, .diagnostics, .management, .dma
+        .ipc, .memory, .time, .ports, .mmio, .power, .diagnostics, .management, .dma, .accounts, .firmware
 
     };
 

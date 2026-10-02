@@ -12,6 +12,9 @@ import threading
 import time
 
 PROMPT = re.compile(rb"\nobsidian \[[^\]]*\]> $")
+LOGIN = re.compile(rb"\nlogin: $")
+SECRET = re.compile(rb"password: $")
+OFF = re.compile(rb"shutdown: powering off\r\n")
 KEYS = {"H": b"\x1b[A", "P": b"\x1b[B", "M": b"\x1b[C", "K": b"\x1b[D", "G": b"\x1b[H", "O": b"\x1b[F", "S": b"\x1b[3~"}
 
 
@@ -73,14 +76,14 @@ def session(name, transcript, script):
     pipe = Pipe(name)
     captured = bytearray()
 
-    def command(text):
+    def command(text, until=PROMPT, timeout=10):
         captured.extend(pipe.read())
         pipe.write(text)
         response = bytearray()
-        deadline = time.monotonic() + 10
+        deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             response.extend(pipe.read())
-            if PROMPT.search(response):
+            if until.search(response):
                 captured.extend(response)
                 return response.decode("ascii", errors="replace")
             time.sleep(0.01)
@@ -92,21 +95,42 @@ def session(name, transcript, script):
             raise RuntimeError(f"Terminal acceptance failed: {detail}")
 
     try:
-        command(b"\r")
         script(command, require)
     finally:
         Path(transcript).write_bytes(captured)
         pipe.close()
 
 
+def login(command, name, password):
+    command(b"\r", LOGIN)
+    command(name + b"\r", SECRET)
+    return command(password + b"\r")
+
+
+def choose(command, request, password, until=PROMPT):
+    command(request, SECRET)
+    command(password + b"\r", SECRET)
+    return command(password + b"\r", until)
+
+
+def setup(command, require):
+    command(b"\r")
+    require("\r\nnobody\r\n" in command(b"whoami\r"), "setup runs before any account exists")
+    created = choose(command, b"useradd admin\r", b"granite", LOGIN)
+    require("created admin" in created and "Log in" in created, "first account")
+    command(b"admin\r", SECRET)
+    require("Welcome, admin" in command(b"granite\r"), "administrator login")
+
+
 def smoke(command, require):
+    setup(command, require)
     require("Available Commands" in command(b"help\r"), "help")
     permissions = command(b"permissions\r")
     require(all(f"\r\n{name}\r\n" in permissions for name in ("ipc", "memory", "time")), "visible permission array")
     require("ports" not in permissions and "management" not in permissions, "application permission limits")
     require("\r\nhello services\r\n" in command(b"echo hello services\r"), "echo")
     require("\r\nfixed\r\n" in command(b"echo fixex\x08d\r"), "backspace")
-    require("^C\r\nobsidian [/]> " in command(b"echo discarded\x03"), "line cancellation")
+    require("^C\r\nobsidian [/home/admin]> " in command(b"echo discarded\x03"), "line cancellation")
     require("\r\nheld\r\n" in command(b"echo hed\x1b[Dl\r"), "cursor editing")
     require("\r\nheld\r\n" in command(b"\x1b[A\r"), "history recall")
     require("\r\nipc\r\n" in command(b"perm\t\r"), "tab completion")
@@ -120,23 +144,26 @@ def smoke(command, require):
     require(re.findall(r"\r\n(\d+)\r\n", command(b"id\r")) == identity, "shell survived restart")
     require(re.search(r"serial +\d+", command(b"services\r")), "discovery")
     require(re.search(r"storage +\d+", command(b"services\r")), "storage service")
-    require("already exists" not in command(b"mkdir /docs\r"), "mkdir")
+    require("permission denied" in command(b"mkdir /docs\r"), "the root directory belongs to the system")
+    require("already exists" not in command(b"mkdir docs\r"), "mkdir")
     require("already exists" in command(b"mkdir docs\r"), "duplicate directory")
-    require("obsidian [/docs]> " in command(b"cd docs\r"), "working directory")
+    require("obsidian [/home/admin/docs]> " in command(b"cd docs\r"), "working directory")
     command(b"write note.txt hello granite\r")
     require("\r\nhello granite\r\n" in command(b"cat note.txt\r"), "file contents")
-    require(re.search(r" 14  note\.txt\r\n", command(b"ls\r")), "file listing")
-    require("directory not empty" in command(b"rm /docs\r"), "non-empty directory removal")
-    require("obsidian [/]> " in command(b"cd ..\r"), "parent directory")
+    require(re.search(r"-rw-r--r-- admin +14  note\.txt\r\n", command(b"ls\r")), "file listing")
+    require("directory not empty" in command(b"rm /home/admin/docs\r"), "non-empty directory removal")
+    require("obsidian [/home/admin]> " in command(b"cd ..\r"), "parent directory")
     command(b"write scratch temporary\r")
     command(b"rm scratch\r")
     require("not found" in command(b"cat scratch\r"), "file removal")
-    require("docs/" in command(b"ls\r"), "root listing")
+    require("docs/" in command(b"ls\r"), "home listing")
+    require("drwx------ admin" in command(b"ls /home\r"), "private home directory")
     require(re.search(r"\d+ KiB total, \d+ KiB free", command(b"volume\r")), "volume usage")
-    for service in (b"files", b"storage"):
+    for service in (b"files", b"storage", b"accounts"):
         require("supervisor will recover" in command(b"crash " + service + b"\r"), f"{service.decode()} crash")
         time.sleep(0.5)
-        require("\r\nhello granite\r\n" in command(b"cat /docs/note.txt\r"), f"{service.decode()} recovery")
+        require("\r\nhello granite\r\n" in command(b"cat /home/admin/docs/note.txt\r"), f"{service.decode()} recovery")
+    require("\r\nadmin\r\n" in command(b"whoami\r"), "sessions outlive the accounts service")
     for _ in range(4):
         command(b"crash helper\r")
         time.sleep(0.5)
@@ -147,16 +174,84 @@ def smoke(command, require):
     time.sleep(0.5)
     require("helper unavailable" in command(b"ping\r"), "exhausted service stays offline")
     require(re.findall(r"\r\n(\d+)\r\n", command(b"id\r")) == identity, "restart exhaustion isolates failure")
+    accounts(command, require)
     print("Interactive terminal and shell passed.")
 
 
+def accounts(command, require):
+    require("created alice" in choose(command, b"useradd alice\r", b"alice"), "administrator creates an account")
+    listed = command(b"users\r")
+    require(re.search(r"admin +1000 +admin", listed) and re.search(r"alice +1001 +\r\n", listed), "account listing")
+    command(b"write shared visible\r")
+    command(b"logout\r", LOGIN)
+    command(b"alice\r", SECRET)
+    require("Login incorrect" in command(b"wrong\r", LOGIN), "wrong password")
+    command(b"alice\r", SECRET)
+    require("obsidian [/home/alice]> " in command(b"alice\r"), "second account login")
+    require("permission denied" in command(b"cat /home/admin/shared\r"), "private home directories")
+    require("permission denied" in command(b"ls /home/admin\r"), "private home listing")
+    require("request denied" in command(b"crash helper\r"), "service control needs an administrator")
+    require("permission denied" in command(b"userdel admin\r"), "account removal needs an administrator")
+    command(b"write diary shared\r")
+    command(b"write secret hidden\r")
+    command(b"chmod 600 secret\r")
+    command(b"passwd\r", SECRET)
+    require("password updated" in choose(command, b"alice\r", b"alice2"), "password change")
+    command(b"lock\r", SECRET)
+    require("Incorrect password" in command(b"alice\r", SECRET), "lock rejects the old password")
+    require("obsidian [/home/alice]> " in command(b"alice2\r"), "unlock")
+    command(b"chmod 755 /home/alice\r")
+    require("drwxr-xr-x alice" in command(b"ls /home\r"), "owners set permissions")
+    command(b"logout\r", LOGIN)
+    command(b"admin\r", SECRET)
+    require("Welcome, admin" in command(b"granite\r"), "logout and switch account")
+    require("\r\nshared\r\n" in command(b"cat /home/alice/diary\r"), "shared after chmod")
+    require("permission denied" in command(b"cat /home/alice/secret\r"), "administrators have no file bypass")
+    require("permission denied" in command(b"chmod 777 /home/alice/secret\r"), "administrators cannot take over files")
+    require("cannot remove your own" in command(b"userdel admin\r"), "self removal")
+    command(b"userdel alice\r")
+    require("alice" not in command(b"users\r"), "account removal")
+    command(b"logout\r", LOGIN)
+    command(b"alice\r", SECRET)
+    require("Login incorrect" in command(b"alice2\r", LOGIN), "removed accounts cannot log in")
+    command(b"admin\r", SECRET)
+    command(b"granite\r")
+
+
 def persist(command, require):
-    require("\r\nhello granite\r\n" in command(b"cat /docs/note.txt\r"), "file survived restart")
-    require("not found" in command(b"cat /scratch\r"), "removal survived restart")
-    command(b"rm /docs/note.txt\r")
-    command(b"rm /docs\r")
-    require("docs/" not in command(b"ls /\r"), "directory removal")
-    print("Persistent files passed.")
+    require("Welcome, admin" in login(command, b"admin", b"granite"), "account survived power loss")
+    require("\r\nhello granite\r\n" in command(b"cat docs/note.txt\r"), "file survived restart")
+    require("not found" in command(b"cat scratch\r"), "removal survived restart")
+    require("drwx------ admin" in command(b"ls /home\r"), "permissions survived restart")
+    command(b"rm docs/note.txt\r")
+    command(b"rm docs\r")
+    require("docs/" not in command(b"ls\r"), "directory removal")
+    print("Persistent files and accounts passed.")
+    command(b"reboot\r", re.compile(rb"reboot: restarting\r\n"))
+
+
+def power(command, require):
+    require("Welcome, admin" in login(command, b"admin", b"granite"), "login after reboot")
+    command(b"shutdown\r", OFF)
+    print("Reboot and shutdown requested.")
+
+
+def install(command, require):
+    command(b"\r")
+    require("not found" in command(b"volume\r"), "no volume before installation")
+    installed = command(b"install\r", timeout=60)
+    require(re.search(r"installed to disk \d+; boot entry Boot[0-9A-F]{4}", installed), f"install: {installed}")
+    setup(command, require)
+    command(b"write installed beside the existing OS\r")
+    command(b"shutdown\r", OFF)
+    print("Installation passed.")
+
+
+def installed(command, require):
+    login(command, b"admin", b"granite")
+    require("\r\nbeside the existing OS\r\n" in command(b"cat installed\r"), "installed system boots from its own disk")
+    command(b"shutdown\r", OFF)
+    print("Installed boot passed.")
 
 
 def typed():
@@ -212,11 +307,12 @@ def attach(name):
 
 if __name__ == "__main__":
     try:
-        if sys.argv[1:2] in (["smoke"], ["persist"]) and len(sys.argv) == 4:
-            session(sys.argv[2], sys.argv[3], smoke if sys.argv[1] == "smoke" else persist)
+        scripts = {"smoke": smoke, "persist": persist, "power": power, "install": install, "installed": installed}
+        if sys.argv[1:2] and sys.argv[1] in scripts and len(sys.argv) == 4:
+            session(sys.argv[2], sys.argv[3], scripts[sys.argv[1]])
         elif sys.argv[1:2] == ["attach"] and len(sys.argv) == 3:
             attach(sys.argv[2])
         else:
-            sys.exit("Usage: terminal.py attach PIPE | smoke|persist PIPE TRANSCRIPT")
+            sys.exit(f"Usage: terminal.py attach PIPE | {'|'.join(scripts)} PIPE TRANSCRIPT")
     except (RuntimeError, OSError) as error:
         sys.exit(str(error))

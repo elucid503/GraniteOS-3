@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const volume = @import("volume.zig");
+const disk = @import("disk.zig");
 
 const api = @import("api");
 
@@ -9,32 +10,7 @@ pub const panic = api.panic;
 
 const path_limit = 1024;
 
-const Disk = struct {
-
-    index: u8,
-
-    pub fn read(self: Disk, lba: u64, bytes: []u8) volume.Error!void {
-
-        try transfer(.read, self.index, lba, bytes);
-
-    }
-
-    pub fn write(self: Disk, lba: u64, bytes: []const u8) volume.Error!void {
-
-        try transfer(.write, self.index, lba, @constCast(bytes));
-
-    }
-
-    pub fn flush(self: Disk) volume.Error!void {
-
-        if (try request(.flush, self.index, chunk[0..0]) != 0) return error.Device;
-
-    }
-
-};
-
-var storage: u64 = 0;
-var mounted: volume.Volume(Disk) = undefined;
+var mounted: volume.Volume(disk.Disk) = undefined;
 var ready = false;
 
 var path: [path_limit + 1]u8 = undefined;
@@ -67,7 +43,7 @@ fn handle(message: api.Request) u64 {
 
         .hello => return protocol.version,
         .crash => return if (message.first == api.raw(.owner, 0, 0, 0).first) fault() else protocol.invalid,
-        .list, .read, .write, .create, .directory, .remove, .volume => {
+        .list, .read, .write, .create, .directory, .remove, .volume, .change => {
 
         },
         else => return protocol.invalid,
@@ -76,6 +52,7 @@ fn handle(message: api.Request) u64 {
 
     // Mounting waits for the first request, so the supervisor's handshake never waits on storage.
     if (!ready) mount() catch |err| return code(err);
+    mounted.user = api.sender(message).user;
 
     if (operation == .volume) {
 
@@ -107,6 +84,13 @@ fn serve(message: api.Request, operation: protocol.Operation, value: u56, name: 
         .create => try mounted.create(name, .file),
         .directory => try mounted.create(name, .directory),
         .remove => try mounted.remove(name),
+        .change => {
+
+            const owner: u32 = @truncate(value >> 16);
+
+            try mounted.change(name, @truncate(value), if (owner == api.abi.nobody.user) null else owner);
+
+        },
         .read => {
 
             var done: u64 = 0;
@@ -144,19 +128,21 @@ fn serve(message: api.Request, operation: protocol.Operation, value: u56, name: 
         },
         .list => {
 
-            // Records are kind, size, name length, then the name.
+            // Records are kind, size, mode, owner, name length, then the name.
             var done: u64 = 0;
             var index: u64 = value;
 
             while (try mounted.entry(name, index)) |entry| : (index += 1) {
 
-                const record = 10 + entry.name.len;
+                const record = 16 + entry.name.len;
                 if (done + record > message.fourth) break;
 
                 chunk[0] = @intFromEnum(entry.kind);
                 std.mem.writeInt(u64, chunk[1..9], entry.size, .little);
-                chunk[9] = @intCast(entry.name.len);
-                @memcpy(chunk[10..record], entry.name);
+                std.mem.writeInt(u16, chunk[9..11], entry.mode, .little);
+                std.mem.writeInt(u32, chunk[11..15], entry.owner, .little);
+                chunk[15] = @intCast(entry.name.len);
+                @memcpy(chunk[16..record], entry.name);
 
                 try api.store(message, done, chunk[0..record]);
                 done += record;
@@ -180,17 +166,17 @@ fn mount() volume.Error!void {
 
     while (index < 32) : (index += 1) {
 
-        const sectors = try request(.info, index, chunk[0..0]);
-        if (sectors == 0 or sectors == protocol.invalid) break;
+        const sectors = try disk.sectors(index);
+        if (sectors == 0) break;
 
-        const disk = Disk{
+        const target = disk.Disk{
 
             .index = index,
 
         };
 
-        const range = try volume.find(disk, &sector, sectors) orelse continue;
-        const formatted = try mounted.mount(disk, range);
+        const range = try volume.find(target, &sector, sectors) orelse continue;
+        const formatted = try mounted.mount(target, range);
 
         ready = true;
         api.log(if (formatted) "files: volume formatted\n" else "files: volume mounted\n");
@@ -203,34 +189,6 @@ fn mount() volume.Error!void {
 
 }
 
-fn transfer(operation: protocol.Operation, index: u8, lba: u64, bytes: []u8) volume.Error!void {
-
-    if (lba >> 48 != 0) return error.Invalid;
-    if (try request(operation, @as(u56, index) << 48 | @as(u56, @intCast(lba)), bytes) != 0) return error.Device;
-
-}
-
-fn request(operation: protocol.Operation, value: u56, window: []u8) volume.Error!u64 {
-
-    for (0..2) |_| {
-
-        if (storage == 0) storage = api.lookup(0, .storage) catch return error.Device;
-
-        return api.exchange(storage, protocol.pack(operation, value), window) catch |err| {
-
-            storage = 0;
-            if (err == error.Missing or err == error.Denied) continue;
-
-            return error.Device;
-
-        };
-
-    }
-
-    return error.Device;
-
-}
-
 fn code(err: anyerror) u64 {
 
     return switch (err) {
@@ -239,6 +197,7 @@ fn code(err: anyerror) u64 {
         error.Exists => protocol.exists,
         error.Full => protocol.full,
         error.Busy => protocol.busy,
+        error.Denied => protocol.denied,
         else => protocol.invalid,
 
     };

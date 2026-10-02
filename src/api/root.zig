@@ -5,8 +5,10 @@ pub const protocol = @import("protocol.zig");
 pub const Terminal = @import("terminal.zig").Terminal;
 pub const files = @import("files.zig");
 pub const Files = files.Files;
+pub const Accounts = @import("accounts.zig").Accounts;
 pub const Request = abi.Request;
 pub const ApiError = error{ Denied, Invalid, Missing, Deadlock, Exhausted, Timeout, Busy };
+pub const ServiceError = ApiError || error{ Exists, Full };
 var environment: ?*const abi.Environment = null;
 
 extern fn invoke(request: *Request) callconv(.c) void;
@@ -163,6 +165,101 @@ pub fn receive(block: bool) ApiError!Request {
 pub fn reply(request: Request, message: u64) ApiError!void {
 
     _ = try checked(raw(.reply, request.first, request.third, message));
+
+}
+
+/// Exchanges `window` with a supervised service, looking it up afresh once if a restart replaced it.
+pub fn query(endpoint: *u64, image: abi.Image, message: u64, window: []u8) ServiceError!u64 {
+
+    for (0..2) |_| {
+
+        if (endpoint.* == 0) endpoint.* = try lookup(0, image);
+
+        const result = exchange(endpoint.*, message, window) catch |err| {
+
+            endpoint.* = 0;
+            if (err == error.Missing or err == error.Denied) continue;
+
+            return err;
+
+        };
+
+        return switch (result) {
+
+            protocol.missing => error.Missing,
+            protocol.exists => error.Exists,
+            protocol.full => error.Full,
+            protocol.busy => error.Busy,
+            protocol.denied => error.Denied,
+            protocol.invalid => error.Invalid,
+            else => result,
+
+        };
+
+    }
+
+    return error.Missing;
+
+}
+
+/// The identity the kernel attached to a received message.
+pub fn sender(message: Request) abi.Identity {
+
+    return @bitCast(message.fifth);
+
+}
+
+/// Reads (`write` false) or writes a global firmware variable; returns the variable's size.
+pub fn variable(name: []const u16, data: []u8, write: bool) ApiError!usize {
+
+    var call_request = Request{
+
+        .number = @intFromEnum(abi.Call.variable),
+        .first = @intFromPtr(name.ptr),
+        .second = name.len,
+        .third = @intFromPtr(data.ptr),
+        .fourth = data.len,
+        .fifth = @intFromBool(write),
+
+    };
+
+    invoke(&call_request);
+
+    return (try checked(call_request)).first;
+
+}
+
+/// Fills `bytes` from the CPU's hardware random generator.
+pub fn random(bytes: []u8) void {
+
+    var index: usize = 0;
+
+    while (index < bytes.len) : (index += 8) {
+
+        const value = std.mem.toBytes(entropy());
+        const size = @min(8, bytes.len - index);
+
+        @memcpy(bytes[index..][0..size], value[0..size]);
+
+    }
+
+}
+
+fn entropy() u64 {
+
+    for (0..10) |_| {
+
+        var ready: u8 = undefined;
+        const value = asm volatile ("rdrand %[value]; setc %[ready]" // Draw from the hardware generator.
+            : [value] "=r" (-> u64),
+              [ready] "=r" (ready),
+        );
+
+        if (ready != 0) return value;
+
+    }
+
+    @panic("Hardware random generator failed");
 
 }
 

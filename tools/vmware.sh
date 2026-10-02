@@ -87,14 +87,18 @@ fi
 zig build -Doptimize=ReleaseSafe "-Dself-test=$([ "$action" = test ] && echo true || echo false)"
 "$python" tools/media.py
 
-directory=zig-out/vm/$action-$media
-serial=$directory/serial.log
-vmx=$(cygpath -m "$project/$directory/granite.vmx")
-# MSYS rewrites a leading `\\` in native arguments, so only the short pipe name crosses into Python.
-pipe=GraniteOS-$action-$media
 
-mkdir -p "$directory"
-: > "$serial"
+# Points every per-machine path at zig-out/vm/NAME.
+prepare() {
+
+    directory=zig-out/vm/$1
+    serial=$directory/serial.log
+    vmx=$(cygpath -m "$project/$directory/granite.vmx")
+    # MSYS rewrites a leading `\\` in native arguments, so only the short pipe name crosses into Python.
+    pipe=GraniteOS-$1
+    mkdir -p "$directory"
+
+}
 
 descriptor() {
 
@@ -115,24 +119,30 @@ EOF
 
 }
 
-# `run` keeps its data disk between sessions; `test` always starts blank.
-[ "$action" = run ] && [ -f "$directory/data.img" ] || cp zig-out/data.img "$directory/data.img"
-descriptor data
+# Attaches the GraniteOS boot media as the first SATA device.
+live() {
 
-if [ "$media" = disk ]; then
+    if [ "$media" = disk ]; then
 
-    cp zig-out/granite.img "$directory/disk.img"
-    descriptor disk
-    device='sata0:0.fileName = "disk.vmdk"'
+        cp zig-out/granite.img "$directory/disk.img"
+        descriptor disk
+        device='sata0:0.present = "TRUE"
+sata0:0.fileName = "disk.vmdk"'
 
-else
+    else
 
-    device="sata0:0.deviceType = \"cdrom-image\"
+        device="sata0:0.present = \"TRUE\"
+sata0:0.deviceType = \"cdrom-image\"
 sata0:0.fileName = \"$(cygpath -m "$project/zig-out/granite.iso")\""
 
-fi
+    fi
 
-cat > "$directory/granite.vmx" <<EOF
+}
+
+start() {
+
+    : > "$serial"
+    cat > "$directory/granite.vmx" <<EOF
 .encoding = "UTF-8"
 config.version = "8"
 virtualHW.version = "21"
@@ -146,7 +156,6 @@ cpuid.coresPerSocket = "$cpus"
 powerType.powerOff = "hard"
 powerType.reset = "hard"
 sata0.present = "TRUE"
-sata0:0.present = "TRUE"
 $device
 sata0:0.startConnected = "TRUE"
 sata0:1.present = "TRUE"
@@ -171,8 +180,18 @@ msg.autoAnswer = "TRUE"
 uuid.action = "create"
 EOF
 
-"$vmrun" start "$vmx" nogui
-trap '"$vmrun" stop "$vmx" hard >/dev/null' EXIT
+    "$vmrun" start "$vmx" nogui
+
+}
+
+prepare "$action-$media"
+
+# `run` keeps its data disk between sessions; `test` always starts blank.
+[ "$action" = run ] && [ -f "$directory/data.img" ] || cp zig-out/data.img "$directory/data.img"
+descriptor data
+live
+start
+trap '"$vmrun" stop "$vmx" hard >/dev/null 2>&1 || true' EXIT
 trap 'exit 130' INT TERM
 
 if [ "$action" = run ]; then
@@ -198,6 +217,7 @@ services: recovery and application APIs passed
 storage: ready'
 failure=': error: |Exception Type|services: acceptance failed'
 
+# Waits until the serial log shows `$1` complete boots.
 booted() {
 
     deadline=$(( $(date +%s) + 120 ))
@@ -206,8 +226,8 @@ booted() {
 
         ! grep -qE "$failure" "$serial" || fail "$(cat "$serial")"
 
-        found=$(printf '%s\n' "$markers" | grep -oFf - "$serial" | sort -u | wc -l)
-        [ "$found" -ne "$(printf '%s\n' "$markers" | wc -l)" ] || [ "$(grep -c 'kernel: verified cpu = ' "$serial")" -ne "$cpus" ] || break
+        missing=$(printf '%s\n' "$markers" | while IFS= read -r marker; do [ "$(grep -cF "$marker" "$serial")" -ge "$1" ] || echo "$marker"; done)
+        [ -n "$missing" ] || [ "$(grep -c 'kernel: verified cpu = ' "$serial")" -lt $(( cpus * $1 )) ] || break
         [ "$(date +%s)" -lt "$deadline" ] || fail "VMware test timed out. Inspect $serial"
         sleep 0.2
 
@@ -215,19 +235,56 @@ booted() {
 
 }
 
-booted
+# Waits for the guest to power itself off.
+halted() {
+
+    deadline=$(( $(date +%s) + 60 ))
+
+    while "$vmrun" list | tr '\\' '/' | grep -qiF "$vmx"; do
+
+        [ "$(date +%s)" -lt "$deadline" ] || fail "The guest did not power off. Inspect $serial"
+        sleep 0.5
+
+    done
+
+}
+
+booted 1
 "$python" tools/terminal.py smoke "$pipe" "$directory/terminal.log"
 grep -q 'files: volume formatted' "$serial" || fail "$(cat "$serial")"
 
 # A full power cycle proves files reached the disk rather than a cache.
 "$vmrun" stop "$vmx" hard
 mv "$serial" "$directory/first.log"
-: > "$serial"
-"$vmrun" start "$vmx" nogui
-booted
+start
+booted 1
 "$python" tools/terminal.py persist "$pipe" "$directory/persist.log"
 grep -q 'files: volume mounted' "$serial" || fail "$(cat "$serial")"
+booted 2
+"$python" tools/terminal.py power "$pipe" "$directory/power.log"
+halted
 
-! grep -qE ': error: |services: acceptance failed' "$directory/first.log" "$serial" || fail "$(cat "$directory/first.log" "$serial")"
-cat "$directory/first.log" "$serial"
+! grep -qE "$failure" "$directory/first.log" "$serial" || fail "$(cat "$directory/first.log" "$serial")"
+printf 'Accounts, files, reboot, and shutdown passed (%s CPUs, %s MB, %s).\n' "$cpus" "$memory" "$media"
+
+# The live media installs beside a disk another OS already owns, then that disk boots alone.
+prepare "$action-$media-install"
+cp zig-out/foreign.img "$directory/data.img"
+descriptor data
+rm -f "$directory/nvram"
+live
+start
+booted 1
+"$python" tools/terminal.py install "$pipe" "$directory/install.log"
+halted
+"$python" tools/media.py verify "$directory/data.img"
+mv "$serial" "$directory/live.log"
+
+device='sata0:0.present = "FALSE"'
+start
+booted 1
+"$python" tools/terminal.py installed "$pipe" "$directory/installed.log"
+halted
+
+! grep -qE "$failure" "$directory/live.log" "$serial" || fail "$(cat "$directory/live.log" "$serial")"
 printf 'VMware test passed (%s CPUs, %s MB, %s).\n' "$cpus" "$memory" "$media"

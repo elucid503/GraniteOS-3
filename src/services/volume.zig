@@ -2,7 +2,10 @@ const std = @import("std");
 
 pub const block_size = 4096;
 pub const name_limit = 247;
-pub const Error = error{ Missing, Exists, Invalid, Full, Busy, Corrupt, Device };
+pub const Error = error{ Missing, Exists, Invalid, Full, Busy, Corrupt, Device, Denied };
+
+/// The user every check admits; matches `abi.system`.
+pub const system: u32 = 0;
 
 /// GPT partition type c9fd8a72-4f14-4449-ae67-540225bb22a4, in on-disk byte order.
 pub const partition = [16]u8{
@@ -36,6 +39,8 @@ pub const Entry = struct {
     name: []const u8,
     kind: Kind,
     size: u64,
+    mode: u16,
+    owner: u32,
 
 };
 
@@ -149,6 +154,9 @@ pub fn Volume(comptime Disk: type) type {
         base: u64,
         super: Super,
 
+        /// Whose permissions the next operation checks.
+        user: u32,
+
         node: Node,
         page: Node,
         record: Record,
@@ -162,6 +170,7 @@ pub fn Volume(comptime Disk: type) type {
 
             self.disk = disk;
             self.base = range.first;
+            self.user = system;
 
             const blocks = range.sectors / sectors;
 
@@ -201,12 +210,15 @@ pub fn Volume(comptime Disk: type) type {
 
                 try self.open(found.node);
                 if (kind != .file or self.node.kind != .file) return error.Exists;
+                try self.require(2);
 
                 try self.resize(found.node, 0);
                 return self.disk.flush();
 
             }
 
+            try self.open(directory);
+            try self.require(2);
             if (self.super.free < 3) return error.Full;
 
             const block = (try self.allocate(directory + 1, 1)).start;
@@ -214,6 +226,7 @@ pub fn Volume(comptime Disk: type) type {
             self.node = std.mem.zeroes(Node);
             self.node.kind = kind;
             self.node.mode = if (kind == .directory) 0o755 else 0o644;
+            self.node.owner = self.user;
             try self.save(block, std.mem.asBytes(&self.node));
 
             self.record = std.mem.zeroes(Record);
@@ -233,6 +246,8 @@ pub fn Volume(comptime Disk: type) type {
             const directory = try self.resolve(parent);
             const found = try self.lookup(directory, name) orelse return error.Missing;
 
+            try self.open(directory);
+            try self.require(2);
             try self.open(found.node);
             if (self.node.kind == .directory and self.node.size != 0) return error.Busy;
 
@@ -263,7 +278,7 @@ pub fn Volume(comptime Disk: type) type {
 
         pub fn read(self: *Self, path: []const u8, offset: u64, out: []u8) Error!usize {
 
-            const node = try self.file(path);
+            const node = try self.file(path, 4);
 
             return self.get(node, offset, out);
 
@@ -271,7 +286,7 @@ pub fn Volume(comptime Disk: type) type {
 
         pub fn write(self: *Self, path: []const u8, offset: u64, bytes: []const u8) Error!void {
 
-            const node = try self.file(path);
+            const node = try self.file(path, 2);
 
             try self.put(node, offset, bytes);
             try self.disk.flush();
@@ -285,6 +300,7 @@ pub fn Volume(comptime Disk: type) type {
 
             try self.open(directory);
             if (self.node.kind != .directory) return error.Invalid;
+            try self.require(4);
             if (index >= self.node.size / record_size) return null;
 
             _ = try self.get(directory, index * record_size, std.mem.asBytes(&self.record));
@@ -296,8 +312,26 @@ pub fn Volume(comptime Disk: type) type {
                 .name = self.record.name[0..self.record.length],
                 .kind = self.node.kind,
                 .size = self.node.size,
+                .mode = self.node.mode,
+                .owner = self.node.owner,
 
             };
+
+        }
+
+        /// Owners may change permission bits; only `system` may also hand a node to another owner.
+        pub fn change(self: *Self, path: []const u8, mode: u16, owner: ?u32) Error!void {
+
+            const node = try self.resolve(path);
+
+            try self.open(node);
+            if (mode > 0o777) return error.Invalid;
+            if (self.user != system and (self.node.owner != self.user or (owner orelse self.user) != self.user)) return error.Denied;
+
+            self.node.mode = mode;
+            self.node.owner = owner orelse self.node.owner;
+            try self.save(node, std.mem.asBytes(&self.node));
+            try self.disk.flush();
 
         }
 
@@ -314,14 +348,24 @@ pub fn Volume(comptime Disk: type) type {
 
         }
 
-        fn file(self: *Self, path: []const u8) Error!u64 {
+        fn file(self: *Self, path: []const u8, need: u16) Error!u64 {
 
             const node = try self.resolve(path);
 
             try self.open(node);
             if (self.node.kind != .file) return error.Invalid;
+            try self.require(need);
 
             return node;
+
+        }
+
+        // Checks `need` (4 read, 2 write, 1 search) against `self.node`; group bits are unused until groups exist.
+        fn require(self: *const Self, need: u16) Error!void {
+
+            const shift: u4 = if (self.node.owner == self.user) 6 else 0;
+
+            if (self.user != system and (self.node.mode >> shift) & need != need) return error.Denied;
 
         }
 
@@ -330,6 +374,7 @@ pub fn Volume(comptime Disk: type) type {
             try valid(name);
             try self.open(directory);
             if (self.node.kind != .directory) return error.Invalid;
+            try self.require(1);
 
             // ponytail: linear scan; index directories if they reach thousands of entries.
             const count = self.node.size / record_size;

@@ -19,10 +19,11 @@ pub fn start() !void {
 
     try task.configure(.service, &.{
 
-        .ipc, .time, .management, .diagnostics
+        .ipc, .time, .management, .diagnostics, .power
 
     });
     try task.grant(.manage, 0, 1);
+    try task.grant(.power, 0, 1);
     try task.grant(.log, 0, 1);
 
     var current = root.processes;
@@ -90,6 +91,8 @@ pub fn spawn(owner: *process.Process, image: abi.Image, argument: u64) !u64 {
         .client => @embedFile("client"),
         .storage => @embedFile("storage"),
         .files => @embedFile("files"),
+        .accounts => @embedFile("accounts"),
+        .install => @embedFile("install"),
 
     };
 
@@ -138,6 +141,36 @@ pub fn spawn(owner: *process.Process, image: abi.Image, argument: u64) !u64 {
 
             });
             try task.grant(.log, 0, 1);
+
+        },
+        .accounts => {
+
+            try task.configure(.service, &.{
+
+                .ipc, .accounts, .diagnostics
+
+            });
+            try task.grant(.log, 0, 1);
+
+        },
+        .install => {
+
+            try task.configure(.service, &.{
+
+                .ipc, .mmio, .firmware, .diagnostics
+
+            });
+            try task.grant(.log, 0, 1);
+
+            if (root.efi) |file| {
+
+                const page = file.base & ~@as(u64, 4095);
+
+                try task.grant(.mmio, page, std.mem.alignForward(u64, file.base + file.size, 4096) - page);
+                task.context.frame.rsi = file.base;
+                task.context.frame.rcx = file.size;
+
+            }
 
         },
         .shell, .client => {
