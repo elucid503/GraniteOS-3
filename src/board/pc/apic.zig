@@ -1,4 +1,5 @@
 const cpu = @import("../../arch/x86/cpu.zig");
+const acpi = @import("acpi.zig");
 
 pub var base: usize = 0xfee00000;
 pub var timer_count: u32 = 0;
@@ -115,5 +116,25 @@ pub fn send(target: u32, command: u32) void {
 pub fn stopOthers() void {
 
     write(0x300, 0xc0400);
+
+}
+
+/// Sends I/O APIC input `route` to processor `target` as `vector`; false when the controller lacks that input.
+pub fn redirect(route: acpi.Route, vector: u8, target: u32) bool {
+
+    const select: *volatile u32 = @ptrFromInt(route.controller);
+    const window: *volatile u32 = @ptrFromInt(route.controller + 0x10);
+
+    // Register 1 holds the last input's index in bits 16-23.
+    select.* = 1;
+    if (route.pin > window.* >> 16 & 0xff) return false;
+
+    // ponytail: level-triggered lines refire until the device is serviced; mask them until the service is done if one appears.
+    select.* = 0x11 + route.pin * 2;
+    window.* = target << 24;
+    select.* = 0x10 + route.pin * 2;
+    window.* = vector | @as(u32, @intFromBool(route.low)) << 13 | @as(u32, @intFromBool(route.level)) << 15;
+
+    return true;
 
 }

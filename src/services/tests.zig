@@ -6,6 +6,27 @@ const protocol = @import("../api/protocol.zig");
 const volume = @import("volume.zig");
 const gpt = @import("gpt.zig");
 const fat = @import("fat.zig");
+const gpu = @import("gpu.zig");
+
+test "GPU quads cover exactly their pixels and sample texel centres under either pixel-centre convention" {
+
+    for ([_]f32{ 0.5, 0 }) |shift| {
+
+        // A four-by-two area at (3, 5) of a 16 by 8 frame, where pixel n's centre lies at n + 0.5 - shift.
+        const corners = gpu.place(3, 5, 4, 2, 16, 8, shift);
+        const left = (corners[0] + 1) * 8;
+        const right = (corners[4] + 1) * 8;
+        const top = (1 - corners[1]) * 4;
+        const bottom = (1 - corners[9]) * 4;
+
+        try std.testing.expectApproxEqAbs(0.125, (3.5 - shift - left) / (right - left), 1e-5);
+        try std.testing.expectApproxEqAbs(0.875, (6.5 - shift - left) / (right - left), 1e-5);
+        try std.testing.expectApproxEqAbs(0.25, (5.5 - shift - top) / (bottom - top), 1e-5);
+        try std.testing.expect(2.5 - shift < left and 7.5 - shift > right);
+
+    }
+
+}
 
 test "restart policy backs off and stops after three replacements" {
 

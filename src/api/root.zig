@@ -160,14 +160,11 @@ pub fn dma() ApiError!Page {
 
 }
 
-/// Physically contiguous memory that other processes may attach once lent to them.
+/// Memory that other processes may attach once lent to them; its pages need not be physically adjacent.
 pub const Shared = struct {
 
     handle: u64,
     bytes: []align(4096) u8,
-
-    /// Zero unless the caller may program devices.
-    physical: u64,
 
 };
 
@@ -202,9 +199,15 @@ fn mapped(result: Request) Shared {
 
         .handle = result.second,
         .bytes = @as([*]align(4096) u8, @ptrFromInt(result.first))[0 .. result.third * 4096],
-        .physical = result.fourth,
 
     };
+
+}
+
+/// The physical address behind `address`, for drivers programming devices.
+pub fn physical(address: usize) ApiError!u64 {
+
+    return (try checked(raw(.physical, address, 0, 0))).first;
 
 }
 

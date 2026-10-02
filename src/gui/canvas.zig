@@ -190,10 +190,14 @@ pub const Canvas = struct {
 
         const scale = size / face.units;
         var pen: f32 = @floatFromInt(x);
+        var previous: u16 = 0;
 
         for (string) |char| {
 
             const glyph = face.lookup(char);
+
+            pen += face.kerning(previous, glyph) * scale;
+            previous = glyph;
 
             if (face.render(glyph, scale, pen - @floor(pen))) |bitmap| {
 

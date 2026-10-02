@@ -5,7 +5,9 @@ const process = @import("process.zig");
 const ipc = @import("ipc.zig");
 const abi = @import("abi.zig");
 const pci = @import("../board/pc/pci.zig");
+const machine = @import("../arch/root.zig").machine;
 
+var listeners = [_]u64{0} ** 16;
 var supervisor: u64 = 0;
 var restarting = false;
 var attempts: u8 = 0;
@@ -235,6 +237,10 @@ pub fn spawn(owner: *process.Process, image: abi.Image, argument: u64) !u64 {
             try task.grant(.port, 0x64, 1);
             try task.grant(.log, 0, 1);
 
+            // The PS/2 keyboard and mouse.
+            try listen(task, 1);
+            try listen(task, 12);
+
         },
         .shell, .client, .login => {
 
@@ -247,6 +253,22 @@ pub fn spawn(owner: *process.Process, image: abi.Image, argument: u64) !u64 {
     try owner.grant(.send, task.id, 1);
 
     return task.id;
+
+}
+
+fn listen(task: *process.Process, irq: u4) !void {
+
+    try machine.route(irq, task.home);
+    listeners[irq] = task.id;
+
+}
+
+/// Hands ISA interrupt `irq` to its listener, if that process still runs.
+pub fn interrupt(irq: u4) void {
+
+    const task = ipc.find(root.processes, listeners[irq]) orelse return;
+
+    ipc.signal(task, @as(u64, 1) << irq);
 
 }
 

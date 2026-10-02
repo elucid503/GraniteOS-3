@@ -283,8 +283,12 @@ fn invoke(task: *process.Process, ticks: u64, frame: *abi.Request) CallError!voi
             frame.second = region.handle;
             frame.third = region.pages;
 
-            // Only drivers learn where the memory physically lives.
-            frame.fourth = if (task.policy.permits(.dma)) region.physical else 0;
+        },
+        .physical => {
+
+            // Only drivers learn where memory physically lives.
+            if (!task.policy.permits(.dma)) return error.Denied;
+            frame.first = try task.space.translate(frame.first, false);
 
         },
         .lend => {

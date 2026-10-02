@@ -102,6 +102,63 @@ pub fn sleepTypes(dsdt: []const u8) ?[2]u8 {
 
 }
 
+/// An I/O APIC input and how its line signals.
+pub const Route = struct {
+
+    controller: u64,
+    pin: u32,
+
+    low: bool = false,
+    level: bool = false,
+
+};
+
+/// Finds the I/O APIC input that ISA interrupt `irq` arrives on, following source overrides.
+pub fn isa(madt: []const u8, irq: u8) ?Route {
+
+    var line: u32 = irq;
+    var flags: u16 = 0;
+    var offset: usize = 44;
+
+    while (offset < madt.len) : (offset += madt[offset + 1]) {
+
+        if (madt[offset] != 2 or madt[offset + 2] != 0 or madt[offset + 3] != irq) continue;
+
+        line = read(u32, madt, offset + 4);
+        flags = read(u16, madt, offset + 8);
+
+    }
+
+    var found: ?Route = null;
+
+    offset = 44;
+
+    while (offset < madt.len) : (offset += madt[offset + 1]) {
+
+        if (madt[offset] != 1) continue;
+
+        const first = read(u32, madt, offset + 8);
+
+        // The controller whose inputs start closest below the line serves it.
+        if (first > line or (found != null and found.?.pin < line - first)) continue;
+
+        // Polarity and trigger fields of 3 mean active low and level; ISA defaults to high and edge.
+        found = .{
+
+            .controller = read(u32, madt, offset + 4),
+            .pin = line - first,
+
+            .low = flags & 3 == 3,
+            .level = flags >> 2 & 3 == 3,
+
+        };
+
+    }
+
+    return found;
+
+}
+
 pub fn validateMadt(bytes: []const u8) AcpiError!void {
 
     if (bytes.len < 44 or !std.mem.eql(u8, bytes[0..4], "APIC") or read(u32, bytes, 4) != bytes.len or !checksum(bytes)) return error.InvalidAcpi;
@@ -115,7 +172,7 @@ pub fn validateMadt(bytes: []const u8) AcpiError!void {
         const size = bytes[offset + 1];
 
         if (size < 2 or size > bytes.len - offset) return error.InvalidAcpi;
-        if ((bytes[offset] == 0 and size != 8) or (bytes[offset] == 5 and size != 12) or (bytes[offset] == 9 and size != 16)) return error.InvalidAcpi;
+        if ((bytes[offset] == 0 and size != 8) or (bytes[offset] == 1 and size != 12) or (bytes[offset] == 2 and size != 10) or (bytes[offset] == 5 and size != 12) or (bytes[offset] == 9 and size != 16)) return error.InvalidAcpi;
 
         offset += size;
 

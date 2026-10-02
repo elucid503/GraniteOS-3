@@ -20,6 +20,11 @@ const fifo_registers = 30;
 const gmr_ids = 43;
 const traces = 45;
 const gmr_pages = 46;
+const max_primary = 50;
+const device_capability = 52;
+const target_width = 55;
+const target_height = 56;
+const object_size = 57;
 
 // FIFO registers, as word offsets into the command FIFO.
 const fifo_min = 0;
@@ -34,16 +39,19 @@ const fifo_cursor_count = 12;
 const fifo_busy = 290;
 
 const version = 0x90000002;
+const three_d = 0x4000;
 const extended_fifo = 0x8000;
 const alpha_cursor = 0x200;
 const has_traces = 0x200000;
 const gmr2 = 0x400000;
 const screen_object = 0x800000;
+const guest_backed = 0x8000000;
 const fifo_bypass = 1 << 4;
 const fifo_screen_object = 1 << 9;
 
 const define_alpha_cursor = 22;
 const define_screen = 34;
+const destroy_screen = 35;
 const define_gmrfb = 36;
 const blit_to_screen = 37;
 const define_gmr2 = 41;
@@ -61,6 +69,9 @@ pub const Device = struct {
 
     pending: bool = false,
     bypass: bool = false,
+
+    /// Whether the host renders guest-backed 3D objects and can show a frame our size through a screen target.
+    accelerated: bool = false,
 
     /// Takes over the adapter at `width` by `height`; null when it lacks screen objects or guest memory regions.
     pub fn init(bars: []const api.abi.Bar, width: u32, height: u32) ?Device {
@@ -110,6 +121,13 @@ pub const Device = struct {
 
         device.bypass = device.fifo[fifo_capabilities] & fifo_bypass != 0;
 
+        // Current hosts offer 3D only through guest-backed objects; device capability 0 says whether it is switched on.
+        const frame = width * height * 4;
+
+        device.accelerated = features & three_d != 0 and features & guest_backed != 0 and device.capability(0) != 0 and
+            device.read(target_width) >= width and device.read(target_height) >= height and
+            device.read(object_size) >= frame and device.read(max_primary) >= frame;
+
         // Screen 0: primary, rooted at the origin, its backing store at the start of VRAM.
         device.command(&.{
 
@@ -121,8 +139,10 @@ pub const Device = struct {
 
     }
 
-    /// Registers `pages` of contiguous RAM at `physical` as the frame the device copies from.
-    pub fn bind(self: *Device, physical: u64, pages: u32, pitch: u32) bool {
+    /// Registers `frame` as the memory the device copies from; its pages may lie anywhere in RAM.
+    pub fn bind(self: *Device, frame: []align(4096) const u8, pitch: u32) bool {
+
+        const pages: u32 = @intCast(frame.len / 4096);
 
         if (pages > self.read(gmr_pages) or self.read(gmr_ids) <= surface_gmr) return false;
 
@@ -140,7 +160,14 @@ pub const Device = struct {
 
             self.reserve(5 + count);
             for ([_]u32{ remap_gmr2, surface_gmr, 0, offset, count }) |word| self.put(word);
-            for (0..count) |page| self.put(@intCast((physical >> 12) + offset + page));
+            for (0..count) |page| {
+
+                const physical = api.physical(@intFromPtr(frame.ptr) + (offset + page) * 4096) catch return false;
+
+                self.put(@intCast(physical >> 12));
+
+            }
+
             self.commit();
             offset += count;
 
@@ -154,6 +181,28 @@ pub const Device = struct {
         });
 
         return true;
+
+    }
+
+    /// Drops screen object 0, so a screen target can show frames in its place.
+    pub fn retire(self: *Device) void {
+
+        self.command(&.{
+
+            destroy_screen, 0,
+
+        });
+
+    }
+
+    /// Queues SVGA3D command `command_id` with `body`, whose size the header carries.
+    pub fn submit(self: *Device, command_id: u32, body: []const u32) void {
+
+        self.reserve(2 + body.len);
+        self.put(command_id);
+        self.put(@intCast(body.len * 4));
+        for (body) |word| self.put(word);
+        self.commit();
 
     }
 
@@ -265,6 +314,14 @@ pub const Device = struct {
         const stop = self.fifo[fifo_stop];
 
         return if (next >= stop) self.fifo[fifo_max] - next + stop - self.fifo[fifo_min] else stop - next;
+
+    }
+
+    fn capability(self: *Device, index: u32) u32 {
+
+        self.write(device_capability, index);
+
+        return self.read(device_capability);
 
     }
 

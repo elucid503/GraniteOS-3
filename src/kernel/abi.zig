@@ -42,6 +42,7 @@ pub const Call = enum(u64) {
     attach = 28,
     detach = 29,
     alive = 30,
+    physical = 31,
     _,
 
 };

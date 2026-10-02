@@ -80,6 +80,13 @@ pub fn receive(head: ?*Process, receiver: *Process) void {
 
 pub fn poll(head: ?*Process, receiver: *Process) bool {
 
+    if (receiver.signals != 0) {
+
+        notify(receiver);
+        return true;
+
+    }
+
     var first: ?*Process = null;
     var current = head;
 
@@ -161,6 +168,28 @@ pub fn cancel(head: ?*Process, id: u64) void {
         complete(sender, 3, 0);
 
     }
+
+}
+
+/// Records interrupts `bits` for `task`; it receives them as one message from process 0.
+pub fn signal(task: *Process, bits: u64) void {
+
+    task.signals |= bits;
+    if (task.state == .receiving) notify(task);
+
+}
+
+fn notify(receiver: *Process) void {
+
+    receiver.context.respond(.{
+
+        .number = 0,
+        .second = receiver.signals,
+
+    });
+
+    receiver.signals = 0;
+    receiver.state = .ready;
 
 }
 

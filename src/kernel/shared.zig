@@ -6,6 +6,9 @@ const ipc = @import("ipc.zig");
 const paging = arch.paging;
 pub const SharedError = error{ Denied, Invalid, Exhausted, NoProcess };
 
+// 256 MiB bounds a single allocation.
+const limit = 0x10000;
+
 const Holder = struct {
 
     id: u64 = 0,
@@ -13,14 +16,23 @@ const Holder = struct {
 
 };
 
-/// Physically contiguous memory mapped into every holder; freed once the last holder lets go.
+/// Pages mapped into every holder, wherever they lie physically; freed once the last holder lets go.
 const Region = struct {
 
-    physical: usize = 0,
+    next: ?*Region = null,
+    handle: u64,
     pages: usize = 0,
-    generation: u64 = 0,
 
-    holders: [4]Holder = [_]Holder{.{}} ** 4,
+    /// Physical page addresses, 512 to a list page.
+    lists: [limit / 512]?*[512]usize = [_]?*[512]usize{null} ** (limit / 512),
+
+    holders: [128]Holder = [_]Holder{.{}} ** 128,
+
+    fn frame(self: *const Region, page: usize) usize {
+
+        return self.lists[page / 512].?[page % 512];
+
+    }
 
 };
 
@@ -28,43 +40,45 @@ pub const Mapping = struct {
 
     handle: u64,
     address: usize,
-    physical: usize,
     pages: usize,
 
 };
 
-// ponytail: fixed table of 64 regions with 4 holders each; grow when more surfaces or sharers appear.
-var regions = [_]Region{.{}} ** 64;
+var regions: ?*Region = null;
+var handles: u64 = 0;
 
 pub fn create(task: *process.Process, pages: u64) !Mapping {
 
-    // 256 MiB bounds a single allocation.
-    if (pages == 0 or pages > 0x10000) return error.Invalid;
+    if (pages == 0 or pages > limit) return error.Invalid;
 
-    const index = for (regions, 0..) |region, slot| {
+    const region: *Region = @ptrFromInt(try root.frames.alloc());
 
-        if (region.pages == 0) break slot;
-
-    } else return error.Exhausted;
-
-    // ponytail: one contiguous run per region; switch to page lists once fragmentation makes large runs fail.
-    const physical = try root.frames.allocRun(pages);
-    errdefer release(physical, pages);
-
-    @memset(@as([*]u8, @ptrFromInt(physical))[0 .. pages * 4096], 0);
-
-    const region = &regions[index];
-
+    handles += 1;
     region.* = .{
 
-        .physical = physical,
-        .pages = pages,
-        .generation = region.generation +% 1,
+        .handle = handles,
 
     };
-    errdefer region.pages = 0;
+    errdefer destroy(region);
 
-    return describe(region, index, try map(task, region));
+    while (region.pages < pages) : (region.pages += 1) {
+
+        const list = &region.lists[region.pages / 512];
+        if (list.* == null) list.* = @ptrFromInt(try root.frames.alloc());
+
+        const physical = try root.frames.alloc();
+
+        @memset(@as(*[4096]u8, @ptrFromInt(physical)), 0);
+        list.*.?[region.pages % 512] = physical;
+
+    }
+
+    const address = try map(task, region);
+
+    region.next = regions;
+    regions = region;
+
+    return describe(region, address);
 
 }
 
@@ -86,7 +100,7 @@ pub fn attach(task: *process.Process, handle: u64) !Mapping {
     if (!task.permits(.region, handle, 1)) return error.Denied;
     if (holder(region, task.id) != null) return error.Invalid;
 
-    return describe(region, handle & 0xff, try map(task, region));
+    return describe(region, try map(task, region));
 
 }
 
@@ -108,9 +122,11 @@ pub fn detach(task: *process.Process, handle: u64) !void {
 /// Drops every hold of a reaped process.
 pub fn departed(id: u64) void {
 
-    for (&regions) |*region| {
+    var current = regions;
 
-        if (region.pages == 0) continue;
+    while (current) |region| {
+
+        current = region.next;
 
         for (&region.holders) |*slot| {
 
@@ -131,7 +147,7 @@ fn map(task: *process.Process, region: *Region) !usize {
 
     for (0..region.pages) |page| {
 
-        task.space.map(address + page * 4096, region.physical + page * 4096, paging.user | paging.writable | paging.nx | paging.borrowed) catch |err| {
+        task.space.map(address + page * 4096, region.frame(page), paging.user | paging.writable | paging.nx | paging.borrowed) catch |err| {
 
             for (0..page) |mapped| task.space.unmap(address + mapped * 4096) catch {
 
@@ -155,13 +171,12 @@ fn map(task: *process.Process, region: *Region) !usize {
 
 }
 
-fn describe(region: *const Region, index: u64, address: usize) Mapping {
+fn describe(region: *const Region, address: usize) Mapping {
 
     return .{
 
-        .handle = region.generation << 8 | index,
+        .handle = region.handle,
         .address = address,
-        .physical = region.physical,
         .pages = region.pages,
 
     };
@@ -170,13 +185,15 @@ fn describe(region: *const Region, index: u64, address: usize) Mapping {
 
 fn find(handle: u64) !*Region {
 
-    const index = handle & 0xff;
-    if (index >= regions.len) return error.Invalid;
+    var current = regions;
 
-    const region = &regions[index];
-    if (region.pages == 0 or region.generation != handle >> 8) return error.Invalid;
+    while (current) |region| : (current = region.next) {
 
-    return region;
+        if (region.handle == handle) return region;
+
+    }
+
+    return error.Invalid;
 
 }
 
@@ -200,13 +217,31 @@ fn settle(region: *Region) void {
 
     }
 
-    release(region.physical, region.pages);
-    region.pages = 0;
+    var link = &regions;
+
+    while (link.*.? != region) link = &link.*.?.next;
+
+    link.* = region.next;
+    destroy(region);
 
 }
 
-fn release(physical: usize, pages: usize) void {
+fn destroy(region: *Region) void {
 
-    for (0..pages) |page| root.frames.release(physical + page * 4096) catch @panic("Shared page ownership");
+    for (0..region.pages) |page| root.frames.release(region.frame(page)) catch @panic("Shared page ownership");
+
+    for (region.lists) |list| {
+
+        if (list) |page| root.frames.release(@intFromPtr(page)) catch @panic("Shared list ownership");
+
+    }
+
+    root.frames.release(@intFromPtr(region)) catch @panic("Shared region ownership");
+
+}
+
+comptime {
+
+    if (@sizeOf(Region) > 4096) @compileError("Shared region exceeds a page");
 
 }

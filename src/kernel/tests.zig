@@ -250,6 +250,7 @@ fn task(id: u64) process.Process {
     value.ticket = 0;
     value.deadline = 0;
     value.length = 0;
+    value.signals = 0;
     value.identity = abi.nobody;
     value.policy = .{
 
@@ -507,6 +508,38 @@ test "IPC rejects wait cycles and serves senders in arrival order" {
 
 }
 
+test "interrupts wake a receiving service and coalesce while it is busy" {
+
+    var sender = task(1);
+    var service = task(2);
+    var grant = process.Capability{
+
+        .right = .send,
+        .base = 2,
+        .size = 1,
+
+    };
+
+    sender.next = &service;
+    sender.capabilities = &grant;
+
+    ipc.receive(&sender, &service);
+    ipc.signal(&service, 1 << 12);
+    try std.testing.expectEqual(.ready, service.state);
+    try std.testing.expectEqual(0, service.context.request().first);
+    try std.testing.expectEqual(1 << 12, service.context.request().second);
+
+    ipc.signal(&service, 1 << 1);
+    ipc.signal(&service, 1 << 12);
+    try ipc.send(&sender, &sender, 2, 7);
+    try std.testing.expect(ipc.poll(&sender, &service));
+    try std.testing.expectEqual(1 << 1 | 1 << 12, service.context.request().second);
+    try std.testing.expect(ipc.poll(&sender, &service));
+    try std.testing.expectEqual(1, service.context.request().first);
+    try std.testing.expect(!ipc.poll(&sender, &service));
+
+}
+
 test "scheduler rotates ready processes without running blocked or foreign tasks" {
 
     var first = task(1);
@@ -544,6 +577,48 @@ test "MADT parser rejects nonadvancing truncated and corrupted records" {
     fixChecksum(&bytes);
     bytes[10] = 1;
     try std.testing.expectError(error.InvalidAcpi, acpi.validateMadt(&bytes));
+
+}
+
+test "MADT routes ISA interrupts through overrides to the serving I/O APIC" {
+
+    // Two I/O APICs (inputs from 0 and 24), then an override sending IRQ 9 to line 25, level and active low.
+    var bytes = std.mem.zeroes([78]u8);
+    @memcpy(bytes[0..4], "APIC");
+    std.mem.writeInt(u32, bytes[4..8], bytes.len, .little);
+
+    bytes[44] = 1;
+    bytes[45] = 12;
+    std.mem.writeInt(u32, bytes[48..52], 0xfec00000, .little);
+
+    bytes[56] = 1;
+    bytes[57] = 12;
+    std.mem.writeInt(u32, bytes[60..64], 0xfec01000, .little);
+    std.mem.writeInt(u32, bytes[64..68], 24, .little);
+
+    bytes[68] = 2;
+    bytes[69] = 10;
+    bytes[71] = 9;
+    std.mem.writeInt(u32, bytes[72..76], 25, .little);
+    std.mem.writeInt(u16, bytes[76..78], 0xf, .little);
+    fixChecksum(&bytes);
+    try acpi.validateMadt(&bytes);
+
+    try std.testing.expectEqual(acpi.Route{
+
+        .controller = 0xfec00000,
+        .pin = 1,
+
+    }, acpi.isa(&bytes, 1).?);
+    try std.testing.expectEqual(acpi.Route{
+
+        .controller = 0xfec01000,
+        .pin = 1,
+
+        .low = true,
+        .level = true,
+
+    }, acpi.isa(&bytes, 9).?);
 
 }
 

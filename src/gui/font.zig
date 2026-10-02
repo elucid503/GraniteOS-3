@@ -57,6 +57,9 @@ pub const Font = struct {
     glyf: usize,
     hmtx: usize,
 
+    /// Kerning pairs sorted by glyph pair: left, right, then the adjustment, all big-endian.
+    pairs: []const [6]u8 = &.{},
+
     pub fn init(bytes: []const u8) FontError!Font {
 
         if (bytes.len < 12) return error.UnsupportedFont;
@@ -93,6 +96,19 @@ pub const Font = struct {
         }
 
         if (font.cmap == 0 or font.units == 0 or font.metrics == 0) return error.UnsupportedFont;
+
+        // Only a version 0 table whose first subtable is horizontal format 0 pairs; anything else draws unkerned.
+        if (table(bytes, "kern")) |kern| {
+
+            const count: usize = read(u16, bytes, kern + 10);
+
+            if (read(u16, bytes, kern) == 0 and read(u16, bytes, kern + 2) != 0 and read(u16, bytes, kern + 8) & 0xff07 == 1 and kern + 18 + count * 6 <= bytes.len) {
+
+                font.pairs = std.mem.bytesAsSlice([6]u8, bytes[kern + 18 ..][0 .. count * 6]);
+
+            }
+
+        }
 
         return font;
 
@@ -136,12 +152,29 @@ pub const Font = struct {
 
     }
 
+    /// Spacing adjustment between `left` and the `right` glyph after it, in font units; negative pulls them together.
+    pub fn kerning(self: *const Font, left: u16, right: u16) f32 {
+
+        const index = std.sort.binarySearch([6]u8, self.pairs, @as(u32, left) << 16 | right, order) orelse return 0;
+
+        return @floatFromInt(read(i16, &self.pairs[index], 4));
+
+    }
+
     /// Width of ASCII `string` in pixels at `scale` pixels per unit.
     pub fn measure(self: *const Font, string: []const u8, scale: f32) f32 {
 
         var total: f32 = 0;
+        var previous: u16 = 0;
 
-        for (string) |char| total += self.advance(self.lookup(char)) * scale;
+        for (string) |char| {
+
+            const glyph = self.lookup(char);
+
+            total += (self.kerning(previous, glyph) + self.advance(glyph)) * scale;
+            previous = glyph;
+
+        }
 
         return total;
 
@@ -451,6 +484,12 @@ fn table(bytes: []const u8, comptime tag: *const [4]u8) ?usize {
 fn read(comptime T: type, bytes: []const u8, offset: usize) T {
 
     return std.mem.readInt(T, bytes[offset..][0..@sizeOf(T)], .big);
+
+}
+
+fn order(key: u32, pair: [6]u8) std.math.Order {
+
+    return std.math.order(key, read(u32, &pair, 0));
 
 }
 

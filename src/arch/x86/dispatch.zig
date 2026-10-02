@@ -4,6 +4,7 @@ const calls = @import("../../kernel/syscall.zig");
 const check = @import("../../kernel/check.zig");
 const schedule = @import("../../kernel/schedule.zig");
 const ipc = @import("../../kernel/ipc.zig");
+const service = @import("../../kernel/service.zig");
 
 const options = @import("options");
 
@@ -67,12 +68,13 @@ pub export fn dispatch(frame: *const arch.context.Frame, floating: *const [512]u
 
     if (frame.vector == 32) core.ticks += 1;
     if (frame.vector == 32 and core.id == root.primary) root.ticks +|= 1;
+    if (frame.vector >= machine.legacy and frame.vector < machine.legacy + 16) service.interrupt(@intCast(frame.vector - machine.legacy));
     ipc.expire(root.processes, root.ticks);
     if (frame.vector >= 32 and frame.vector != 128 and frame.vector != 255) machine.apic.write(0xb0, 0);
 
     core.current = null;
     root.reap();
-    @import("../../kernel/service.zig").maintain();
+    service.maintain();
 
     const selected = schedule.choose(root.processes, core.id, core.last_id);
     var result: *const arch.context.Context = &core.idle;

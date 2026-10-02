@@ -64,6 +64,9 @@ pub const Process = struct {
     buffer: u64 = 0,
     length: u64 = 0,
 
+    /// Device interrupts raised since the last `receive`, one bit per ISA line.
+    signals: u64 = 0,
+
     home: u32,
     preemptions: usize = 0,
 

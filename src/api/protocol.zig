@@ -36,6 +36,7 @@ pub const Operation = enum(u8) {
     surface,
     damage,
     wait,
+    input,
     _,
 
 };

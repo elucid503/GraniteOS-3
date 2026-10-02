@@ -10,6 +10,9 @@ pub const panic = api.panic;
 const data = 0x60;
 const control = 0x64;
 
+// Held keys repeat after 250 ms at 30 per second, as Linux and Windows set them; the power-on default is 500 ms at 10.9.
+const typematic = 0x00;
+
 // Scancode set 1 (the controller translates) to US characters; zero marks keys without one.
 const plain = "\x00\x001234567890-=\x00\x00qwertyuiop[]\x00\x00asdfghjkl;'`\x00\\zxcvbnm,./\x00*\x00 ";
 const shifted = "\x00\x00!@#$%^&*()_+\x00\x00QWERTYUIOP{}\x00\x00ASDFGHJKL:\"~\x00|ZXCVBNM<>?\x00*\x00 ";
@@ -30,12 +33,14 @@ var modifiers = Event.Modifiers{};
 var extended = false;
 var caps = false;
 
+var display: u64 = 0;
+var retry: u64 = 0;
+
 pub export fn app_main(_: usize, _: usize, environment: *const api.abi.Environment) callconv(.c) noreturn {
 
     api.start(environment, .service);
     if (!api.permits(.ports) or api.permits(.mmio) or api.permits(.management)) api.exit(2);
 
-    // Polled, so both controller interrupts stay off.
     command(0xad);
     command(0xa7);
     flush();
@@ -43,13 +48,14 @@ pub export fn app_main(_: usize, _: usize, environment: *const api.abi.Environme
     command(0x20);
     const configuration = receive() orelse api.exit(3);
 
-    // Both clocks on, both interrupts off, and translation to scancode set 1.
+    // Both clocks and both interrupts on, and translation to scancode set 1.
     command(0x60);
-    send(configuration & ~@as(u8, 0x33) | 0x40);
+    send(configuration & ~@as(u8, 0x30) | 0x43);
     command(0xae);
     command(0xa8);
     flush();
 
+    _ = device(false, 0xf3) and device(false, typematic);
     const keyboard = device(false, 0xf4);
     const mouse = device(true, 0xf6) and device(true, 0xf4);
 
@@ -59,10 +65,19 @@ pub export fn app_main(_: usize, _: usize, environment: *const api.abi.Environme
     while (true) {
 
         const request = api.receive(true) catch continue;
+
+        // The kernel reports controller interrupts as a message from no process.
+        if (request.first == 0) {
+
+            drain();
+            forward();
+            continue;
+
+        }
+
         const result: u64 = switch (protocol.operation(request.second)) {
 
             .hello => protocol.version,
-            .read => read(request),
             .crash => if (request.first == api.raw(.owner, 0, 0, 0).first) fault() else protocol.invalid,
             else => protocol.invalid,
 
@@ -76,10 +91,8 @@ pub export fn app_main(_: usize, _: usize, environment: *const api.abi.Environme
 
 }
 
-/// Stores pending events into the caller's window, oldest first; returns how many.
-fn read(request: api.Request) u64 {
-
-    drain();
+/// Lends pending events to the display, oldest first, finding it again after a restart.
+fn forward() void {
 
     if (moved and queued < queue.len) {
 
@@ -90,13 +103,24 @@ fn read(request: api.Request) u64 {
 
     }
 
-    const count = @min(queued, request.fourth / @sizeOf(Event));
+    if (queued == 0) return;
 
-    api.store(request, 0, std.mem.sliceAsBytes(queue[0..count])) catch return protocol.invalid;
-    std.mem.copyForwards(Event, queue[0 .. queued - count], queue[count..queued]);
-    queued -= count;
+    if (display == 0) {
 
-    return count;
+        if (api.ticks() < retry) return;
+        retry = api.ticks() + 100;
+        display = api.lookup(0, .display) catch return;
+
+    }
+
+    _ = api.exchange(display, protocol.pack(.input, 0), std.mem.sliceAsBytes(queue[0..queued])) catch {
+
+        display = 0;
+        return;
+
+    };
+
+    queued = 0;
 
 }
 
@@ -238,7 +262,7 @@ fn key(byte: u8) void {
 
 fn push(event: Event) void {
 
-    // ponytail: a full queue drops input; poll faster or grow it if anyone types 64 keys per tick.
+    // ponytail: a full queue drops input, which only builds up while the display is away; keep more if early keys matter.
     if (queued == queue.len) return;
 
     queue[queued] = event;

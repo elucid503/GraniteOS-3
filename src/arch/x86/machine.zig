@@ -44,6 +44,12 @@ pub var cores: ?*Core = null;
 pub var kernel: paging.Space = undefined;
 pub var core_count: usize = 0;
 
+/// ISA interrupt `n` arrives as vector `legacy + n`.
+pub const legacy = 48;
+
+// The MADT, kept to route device interrupts.
+var routes: []const u8 = &.{};
+
 var reset_port: u16 = 0;
 var reset_value: u8 = 0;
 
@@ -72,6 +78,7 @@ pub fn prepare(info: *const boot.Info, frames: *memory.Frames, log: Log) !void {
 
     try acpi.validateMadt(madt);
 
+    routes = madt;
     apic.base = acpi.read(u32, madt, 36);
 
     var offset: usize = 44;
@@ -245,6 +252,18 @@ fn protectImage(info: *const boot.Info) !void {
         while (page < address + size) : (page += 4096) try kernel.protect(@intCast(page), (if (executable) @as(u64, 0) else paging.nx) | (if (write) paging.writable else @as(u64, 0)));
 
     }
+
+}
+
+/// Delivers ISA interrupt `irq` to processor `target`.
+pub fn route(irq: u4, target: u32) !void {
+
+    const line = acpi.isa(routes, irq) orelse return error.NoDevice;
+    const address: usize = @intCast(line.controller);
+
+    try kernel.identity(address, 4096, paging.writable | paging.nx | paging.uncached);
+    try kernel.protect(address, paging.writable | paging.nx | paging.uncached);
+    if (!apic.redirect(line, legacy + @as(u8, irq), target)) return error.NoDevice;
 
 }
 

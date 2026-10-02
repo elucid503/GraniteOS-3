@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const svga = @import("svga.zig");
+const gpu = @import("gpu.zig");
 
 const api = @import("api");
 const gui = @import("gui");
@@ -123,17 +124,22 @@ const Surface = struct {
 var screen: Screen = undefined;
 var back: gui.Canvas = undefined;
 
+var renderer: ?gpu.Gpu = null;
+
 var surfaces = [_]Surface{.{}} ** 8;
+
+comptime {
+
+    if (surfaces.len > gpu.layers) @compileError("The GPU frame holds fewer layers than surfaces");
+
+}
 var stack: [surfaces.len]usize = undefined;
 var depth: usize = 0;
 
 var pointer = gui.Point{};
 var buttons: u8 = 0;
 
-var input: u64 = 0;
-var retry: u64 = 0;
 var sweep: u64 = 0;
-var greeted = false;
 
 pub export fn app_main(_: usize, base: usize, environment: *const api.abi.Environment, geometry: usize, shifts: usize) callconv(.c) noreturn {
 
@@ -163,7 +169,7 @@ pub export fn app_main(_: usize, base: usize, environment: *const api.abi.Enviro
 
         .svga => |*device| {
 
-            if (!device.bind(memory.physical, @intCast(pages), @intCast(size.width * 4))) api.exit(3);
+            if (!device.bind(memory.bytes, @intCast(size.width * 4))) api.exit(3);
 
             var image: [arrow.len * arrow[0].len]u32 = undefined;
 
@@ -181,7 +187,10 @@ pub export fn app_main(_: usize, base: usize, environment: *const api.abi.Enviro
 
             device.shape(&image, arrow[0].len, arrow.len, .{});
             device.point(pointer);
-            api.log("display: ready (svga)\n");
+
+            renderer = gpu.Gpu.init(device, @intCast(size.width), @intCast(size.height));
+
+            api.log(if (renderer != null) "display: ready (svga, 3D on)\n" else if (device.accelerated) "display: ready (svga, 3D failed)\n" else "display: ready (svga, 3D off)\n");
 
         },
         .frame => api.log("display: ready (framebuffer)\n"),
@@ -192,25 +201,14 @@ pub export fn app_main(_: usize, base: usize, environment: *const api.abi.Enviro
 
     while (true) {
 
-        while (api.receive(false)) |request| {
+        const request = api.receive(true) catch continue;
 
-            const result = handle(request) orelse continue;
+        if (handle(request)) |result| api.reply(request, result) catch {
 
-            api.reply(request, result) catch {
+        };
 
-            };
-            greeted = true;
-
-        } else |_| {
-
-        }
-
-        // The supervisor blocks on our first reply, so asking it for input any sooner would deadlock.
-        if (greeted) poll();
+        // ponytail: exited clients are pruned on the next request; add a timer if an idle screen must drop them.
         if (api.ticks() >= sweep) prune();
-
-        // ponytail: 10 ms polling; block on input interrupts once latency matters.
-        api.sleep(1);
 
     }
 
@@ -269,6 +267,7 @@ fn handle(request: api.Request) ?u64 {
         .surface => attach(request, value),
         .damage => damage(request, value),
         .wait => wait(request, value),
+        .input => input(request),
         .crash => if (request.first == api.raw(.owner, 0, 0, 0).first) fault() else protocol.invalid,
         else => protocol.invalid,
 
@@ -294,6 +293,17 @@ fn attach(request: api.Request, region: u64) u64 {
 
         api.detach(memory.handle);
         return protocol.invalid;
+
+    }
+
+    if (renderer) |*device| {
+
+        if (!device.adopt(@intCast(index), memory.bytes, @intCast(area.width), @intCast(area.height))) {
+
+            api.detach(memory.handle);
+            return protocol.full;
+
+        }
 
     }
 
@@ -324,6 +334,8 @@ fn damage(request: api.Request, id: u64) u64 {
     const area = fetch(request) orelse return protocol.invalid;
     const changed = area.intersect(surface.canvas.bounds()) orelse return 0;
 
+    if (renderer) |*device| device.upload(@intCast(id), changed);
+
     compose(.{
 
         .x = changed.x + surface.area.x,
@@ -352,6 +364,21 @@ fn wait(request: api.Request, id: u64) ?u64 {
 fn compose(area: gui.Rect) void {
 
     const visible = area.intersect(back.bounds()) orelse return;
+
+    if (renderer) |*device| {
+
+        var layers: [surfaces.len]gpu.Layer = undefined;
+
+        for (stack[0..depth], 0..) |index, slot| layers[slot] = .{
+
+            .index = @intCast(index),
+            .area = surfaces[index].area,
+
+        };
+
+        return device.compose(visible, layers[0..depth]);
+
+    }
 
     switch (screen) {
 
@@ -386,25 +413,16 @@ fn compose(area: gui.Rect) void {
 
 }
 
-fn poll() void {
+/// Takes the events the input service lends in its window and hands them to surfaces.
+fn input(request: api.Request) u64 {
 
-    if (input == 0) {
+    // Only services run as the system, so clients cannot forge another surface's input.
+    if (api.sender(request).user != api.abi.system.user) return protocol.denied;
 
-        if (api.ticks() < retry) return;
-        retry = api.ticks() + 100;
-        input = api.lookup(0, .input) catch return;
+    var events: [64]api.Event = undefined;
+    const count = @min(request.fourth / @sizeOf(api.Event), events.len);
 
-    }
-
-    var events: [32]api.Event = undefined;
-    const count = api.exchange(input, protocol.pack(.read, 0), std.mem.sliceAsBytes(&events)) catch {
-
-        input = 0;
-        return;
-
-    };
-
-    if (count > events.len) return;
+    api.fetch(request, 0, std.mem.sliceAsBytes(events[0..count])) catch return protocol.invalid;
     for (events[0..count]) |event| route(event);
 
     for (&surfaces) |*surface| {
@@ -412,6 +430,8 @@ fn poll() void {
         if (surface.client != 0) deliver(surface);
 
     }
+
+    return 0;
 
 }
 
@@ -546,6 +566,7 @@ fn close(surface: *Surface) void {
 
     std.mem.copyForwards(usize, stack[position .. depth - 1], stack[position + 1 .. depth]);
     depth -= 1;
+    if (renderer) |*device| device.release(@intCast(index));
     api.detach(surface.memory.handle);
     surface.* = .{};
     compose(area);

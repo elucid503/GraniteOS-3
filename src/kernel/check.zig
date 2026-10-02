@@ -1,6 +1,7 @@
 const arch = @import("../arch/root.zig");
 const root = @import("root.zig");
 const process = @import("process.zig");
+const shared = @import("shared.zig");
 const boot = @import("../boot/info.zig");
 
 const Record = struct {
@@ -81,9 +82,19 @@ fn memoryChecks() !void {
 
     }
 
+    // Many regions, one spanning two page lists and backed by the same pages for both holders.
+    for (0..100) |_| _ = try shared.create(first, 1);
+
+    const region = try shared.create(first, 600);
+
+    try second.grant(.region, region.handle, 1);
+    const view = try shared.attach(second, region.handle);
+
+    if (try first.space.translate(region.address + 599 * 4096, true) != try second.space.translate(view.address + 599 * 4096, true)) return error.SharedRegionMismatch;
+
+    shared.departed(first.id);
+    shared.departed(second.id);
     first.destroy();
-    second.destroy();
-    if (root.frames.free_count != available) return error.ProcessLeak;
 
     var held: usize = 0;
 
@@ -108,6 +119,16 @@ fn memoryChecks() !void {
 
     }
 
+    if (shared.create(second, 8)) |_| {
+
+        return error.MissingAllocationFailure;
+
+    } else |err| {
+
+        if (err != error.OutOfMemory) return err;
+
+    }
+
     if (root.frames.free_count != 5) return error.RollbackLeak;
 
     while (held != 0) {
@@ -119,6 +140,7 @@ fn memoryChecks() !void {
 
     }
 
+    second.destroy();
     if (root.frames.free_count != available) return error.ProcessLeak;
 
     root.log.line("page isolation and allocation rollback passed");

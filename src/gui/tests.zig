@@ -29,6 +29,20 @@ test "font rasterizes every printable ASCII glyph with solid stems and open coun
 
 }
 
+test "font kerns letter pairs from its table and measures with them" {
+
+    const face = font.sans();
+    const scale = 40 / face.units;
+
+    try std.testing.expect(face.pairs.len > 0);
+    try std.testing.expect(face.kerning(face.lookup('A'), face.lookup('V')) < 0);
+    try std.testing.expect(face.kerning(face.lookup('T'), face.lookup('o')) < 0);
+    try std.testing.expectEqual(0, face.kerning(face.lookup('H'), face.lookup('H')));
+    try std.testing.expect(face.measure("AV", scale) < face.measure("A", scale) + face.measure("V", scale));
+    try std.testing.expectEqual(face.measure("HH", scale), 2 * face.measure("H", scale));
+
+}
+
 test "canvas clips fills, rounds corners, and blits only the overlap" {
 
     var pixels = [_]u32{0} ** (32 * 24);
