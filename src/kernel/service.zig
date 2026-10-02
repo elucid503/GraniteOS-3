@@ -93,12 +93,15 @@ pub fn spawn(owner: *process.Process, image: abi.Image, argument: u64) !u64 {
         .files => @embedFile("files"),
         .accounts => @embedFile("accounts"),
         .install => @embedFile("install"),
+        .display => @embedFile("display"),
+        .input => @embedFile("input"),
 
     };
 
     // AHCI: mass storage, SATA, AHCI 1.0; ABAR is BAR 5.
     if (image == .storage and controller == null) controller = pci.find(0x010601, 5);
     if (image == .storage and controller == null) return error.NoDevice;
+    if (image == .display and root.framebuffer == null) return error.NoDevice;
 
     const task = try root.spawn(bytes, argument, owner.home);
     errdefer task.state = .dead;
@@ -171,6 +174,35 @@ pub fn spawn(owner: *process.Process, image: abi.Image, argument: u64) !u64 {
                 task.context.frame.rcx = file.size;
 
             }
+
+        },
+        .display => {
+
+            const screen = root.framebuffer.?;
+            const page = screen.base & ~@as(u64, 4095);
+
+            try task.configure(.service, &.{
+
+                .ipc, .time, .memory, .mmio, .diagnostics
+
+            });
+            try task.grant(.mmio, page, std.mem.alignForward(u64, screen.base + @as(u64, screen.stride) * screen.height * 4, 4096) - page);
+            try task.grant(.log, 0, 1);
+            task.context.frame.rsi = screen.base;
+            task.context.frame.rcx = screen.width | @as(u64, screen.height) << 16 | @as(u64, screen.stride) << 32;
+            task.context.frame.r8 = @ctz(screen.red_mask) | @as(u64, @ctz(screen.green_mask)) << 8 | @as(u64, @ctz(screen.blue_mask)) << 16;
+
+        },
+        .input => {
+
+            try task.configure(.service, &.{
+
+                .ipc, .time, .ports, .diagnostics
+
+            });
+            try task.grant(.port, 0x60, 1);
+            try task.grant(.port, 0x64, 1);
+            try task.grant(.log, 0, 1);
 
         },
         .shell, .client => {

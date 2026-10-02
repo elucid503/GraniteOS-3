@@ -10,7 +10,8 @@ sh tools/vmware.sh test
 ```
 
 `run` builds, boots, and attaches to the Obsidian shell; Ctrl+] disconnects
-and stops the VM. `test` runs the host tests, then the kernel, service, and
+and stops the VM. The VMware window shows the desktop; click inside it to
+capture the mouse, and Ctrl+Alt releases it. `test` runs the host tests, then the kernel, service, and
 shell acceptance checks. Both accept `--media disk`, `--cpus N`, and
 `--memory MB`.
 

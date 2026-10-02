@@ -180,7 +180,8 @@ msg.autoAnswer = "TRUE"
 uuid.action = "create"
 EOF
 
-    "$vmrun" start "$vmx" nogui
+    # `run` shows the VMware window, since the desktop draws there.
+    "$vmrun" start "$vmx" "$([ "$action" = run ] && echo gui || echo nogui)"
 
 }
 
@@ -214,7 +215,9 @@ kernel: ready
 services: ready
 services: supervisor recovered; children adopted
 services: recovery and application APIs passed
-storage: ready'
+storage: ready
+input: ready
+display: ready'
 failure=': error: |Exception Type|services: acceptance failed'
 
 # Waits until the serial log shows `$1` complete boots.

@@ -671,7 +671,7 @@ fn permissions(_: []const u8) Error!void {
 
 fn services(_: []const u8) Error!void {
 
-    for ([_]api.abi.Image{ .serial, .helper, .storage, .files, .accounts, .install, .shell }) |image| {
+    for ([_]api.abi.Image{ .serial, .helper, .storage, .files, .accounts, .install, .input, .display, .shell }) |image| {
 
         const peer = api.lookup(terminal.supervisor, image) catch {
 

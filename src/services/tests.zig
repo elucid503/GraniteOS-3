@@ -6,6 +6,91 @@ const protocol = @import("../api/protocol.zig");
 const volume = @import("volume.zig");
 const gpt = @import("gpt.zig");
 const fat = @import("fat.zig");
+const font = @import("font.zig");
+const canvas = @import("canvas.zig");
+
+test "canvas presents only the damaged area with the pointer clipped at the screen edge" {
+
+    var pixels: [64 * 48]u32 = undefined;
+    var frame = [_]u32{0xdeadbeef} ** (80 * 48);
+    var scene = canvas.Canvas{
+
+        .pixels = &pixels,
+        .width = 64,
+        .height = 48,
+
+        .shifts = .{ 16, 8, 0 },
+
+    };
+
+    scene.fill(.{
+
+        .x = -10,
+        .y = -10,
+        .width = 100,
+        .height = 100,
+
+    }, 0x336699);
+    scene.present(&frame, 80, canvas.cursor(.{
+
+        .x = 56,
+        .y = 40,
+
+    }), .{
+
+        .x = 60,
+        .y = 44,
+
+    });
+
+    try std.testing.expectEqual(0x336699, frame[40 * 80 + 56]);
+    try std.testing.expectEqual(0x000000, frame[44 * 80 + 60]);
+    try std.testing.expectEqual(0xffffff, frame[46 * 80 + 61]);
+    try std.testing.expectEqual(0xdeadbeef, frame[39 * 80 + 56]);
+    try std.testing.expectEqual(0xdeadbeef, frame[44 * 80 + 64]);
+
+    const face = try font.Font.init(@embedFile("fonts/NimbusSans-Regular.ttf"));
+
+    scene.fill(.{
+
+        .x = 0,
+        .y = 0,
+        .width = 64,
+        .height = 48,
+
+    }, 0xffffff);
+    scene.text(&face, "Hi", 32 / face.units, 4.5, 36, 0x000000);
+
+    try std.testing.expect(std.mem.indexOfScalar(u32, &pixels, 0x000000) != null);
+    try std.testing.expect(std.mem.indexOfScalar(u32, &pixels, 0x808080) != null or std.mem.indexOfNone(u32, &pixels, &.{ 0, 0xffffff }) != null);
+
+}
+
+test "font rasterizes every printable ASCII glyph with solid stems and open counters" {
+
+    const face = try font.Font.init(@embedFile("fonts/NimbusSans-Regular.ttf"));
+
+    for ('!'..'~' + 1) |code| {
+
+        const glyph = face.lookup(@intCast(code));
+
+        try std.testing.expect(glyph != 0);
+        try std.testing.expect(face.render(glyph, 40 / face.units, 0.5) != null);
+
+    }
+
+    try std.testing.expectEqual(null, face.render(face.lookup(' '), 40 / face.units, 0));
+
+    const letter = face.render(face.lookup('H'), 64 / face.units, 0).?;
+    const center = letter.width / 2;
+
+    for (letter.coverage) |cell| try std.testing.expect(cell >= 0 and cell <= 1);
+    try std.testing.expect(letter.coverage[letter.height / 4 * letter.width + center] < 0.01);
+    try std.testing.expect(letter.coverage[letter.height / 2 * letter.width + center] > 0.99);
+    try std.testing.expect(std.mem.indexOfScalar(f32, letter.coverage[letter.height / 4 * letter.width ..][0..letter.width], 1) != null);
+    try std.testing.expect(letter.top < -40 and letter.top > -50);
+
+}
 
 test "restart policy backs off and stops after three replacements" {
 

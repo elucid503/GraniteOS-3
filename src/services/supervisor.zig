@@ -58,7 +58,7 @@ fn maintain() void {
 
     for ([_]api.abi.Image{
 
-        .serial, .helper, .storage, .files, .accounts, .install, .shell, .client
+        .serial, .helper, .storage, .files, .accounts, .install, .input, .display, .shell, .client
 
     }) |image| {
 

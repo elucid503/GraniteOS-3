@@ -64,6 +64,8 @@ pub const Image = enum(u64) {
     files,
     accounts,
     install,
+    display,
+    input,
 
 };
 
