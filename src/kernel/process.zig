@@ -25,6 +25,7 @@ pub const Right = enum {
     power,
     log,
     manage,
+    region,
 
 };
 
@@ -149,11 +150,20 @@ pub const Process = struct {
 
     pub fn vacant(self: *const Process) memory.MemoryError!usize {
 
+        return self.reserve(1);
+
+    }
+
+    /// Finds `pages` consecutive unmapped pages at or above the allocation cursor.
+    pub fn reserve(self: *const Process, pages: usize) memory.MemoryError!usize {
+
         var address = self.cursor;
+        var run: usize = 0;
 
         while (address < paging.user_end - 0x100000) : (address += 4096) {
 
-            if (!self.space.present(address)) return address;
+            run = if (self.space.present(address)) 0 else run + 1;
+            if (run == pages) return address + 4096 - pages * 4096;
 
         }
 
@@ -234,6 +244,7 @@ fn required(right: Right) abi.Permission {
         .power => .power,
         .log => .diagnostics,
         .manage => .management,
+        .region => .memory,
 
     };
 

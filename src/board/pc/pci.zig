@@ -4,11 +4,22 @@ pub const Bar = struct {
 
     base: u64,
     size: u64,
+    ports: bool = false,
 
 };
 
-/// Finds the first function of `class` (class, subclass, interface) and enables its memory decoding and bus mastering.
-pub fn find(class: u24, index: u3) ?Bar {
+pub const Match = union(enum) {
+
+    /// Class, subclass, and programming interface.
+    class: u24,
+
+    /// Vendor in the low half, device in the high half.
+    id: u32,
+
+};
+
+/// Finds the first function matching by class code or vendor and device id.
+pub fn find(match: Match) ?u32 {
 
     // ponytail: brute-force scan of every bus; walk bridges if boot time matters.
     for (0..256) |bus| {
@@ -23,9 +34,16 @@ pub fn find(class: u24, index: u3) ?Bar {
             for (0..functions) |function| {
 
                 const at = address(bus, device, function);
-                if (read(at, 0) & 0xffff == 0xffff or read(at, 8) >> 8 != class) continue;
+                if (read(at, 0) & 0xffff == 0xffff) continue;
 
-                return bar(at, index);
+                const found = switch (match) {
+
+                    .class => |code| read(at, 8) >> 8 == code,
+                    .id => |id| read(at, 0) == id,
+
+                };
+
+                if (found) return at;
 
             }
 
@@ -37,28 +55,36 @@ pub fn find(class: u24, index: u3) ?Bar {
 
 }
 
-fn bar(at: u32, index: u3) ?Bar {
+/// Sizes BAR `index` of function `at`, then enables its decoding and bus mastering.
+pub fn bar(at: u32, index: u3) ?Bar {
 
     const offset = 0x10 + @as(u8, index) * 4;
     const command = read(at, 4) & 0xffff;
     const original = read(at, offset);
+    const ports = original & 1 != 0;
+    const mask: u32 = if (ports) ~@as(u32, 3) else ~@as(u32, 0xf);
 
-    if (original & 7 != 0 or original & ~@as(u32, 0xf) == 0) return null;
+    // ponytail: 64-bit memory BARs are skipped; support them when a device places one above 4 GiB.
+    if (!ports and original & 6 != 0 or original & mask == 0) return null;
 
     // Sizing a BAR while it decodes would briefly move the device.
-    write(at, 4, command & ~@as(u32, 2));
+    write(at, 4, command & ~@as(u32, 3));
     write(at, offset, 0xffffffff);
 
-    const size = ~(read(at, offset) & ~@as(u32, 0xf)) +% 1;
+    var size = ~(read(at, offset) & mask) +% 1;
+
+    // I/O BARs may leave their upper half unimplemented.
+    if (ports) size &= 0xffff;
 
     write(at, offset, original);
-    write(at, 4, command | 0x406);
+    write(at, 4, command | 0x407);
     if (size == 0) return null;
 
     return .{
 
-        .base = original & ~@as(u32, 0xf),
+        .base = original & mask,
         .size = size,
+        .ports = ports,
 
     };
 

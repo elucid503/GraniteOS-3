@@ -58,7 +58,7 @@ fn maintain() void {
 
     for ([_]api.abi.Image{
 
-        .serial, .helper, .storage, .files, .accounts, .install, .input, .display, .shell, .client
+        .serial, .helper, .storage, .files, .accounts, .install, .input, .display, .shell, .client, .login
 
     }) |image| {
 
@@ -77,6 +77,7 @@ fn maintain() void {
 
         if (!entry.ready(now)) continue;
         if ((image == .shell or image == .client) and (!entries[0].available or !entries[2].available)) continue;
+        if (image == .login and !entries[@intFromEnum(api.abi.Image.display)].available) continue;
 
         const child = api.raw(.spawn, index, entry.retries, 0);
 
@@ -88,7 +89,7 @@ fn maintain() void {
         }
 
         entry.id = child.first;
-        if (image != .shell and image != .client) {
+        if (!application(image)) {
 
             const version = api.call(entry.id, protocol.pack(.hello, 0)) catch protocol.invalid;
             if (version != protocol.version) {
@@ -113,6 +114,13 @@ fn maintain() void {
         }
 
     }
+
+}
+
+/// Applications never answer `hello` and may not be crashed or restarted on request.
+fn application(image: api.abi.Image) bool {
+
+    return image == .shell or image == .client or image == .login;
 
 }
 
@@ -141,7 +149,7 @@ fn handle(request: api.Request) u64 {
         .crash, .restart => {
 
             if (!api.sender(request).admin and (!options.self_test or request.first != client)) return protocol.invalid;
-            if (value >= entries.len or value == @intFromEnum(api.abi.Image.shell) or value == @intFromEnum(api.abi.Image.client)) return protocol.invalid;
+            if (value >= entries.len or application(@enumFromInt(value))) return protocol.invalid;
 
             const peer = entries[value].id;
 

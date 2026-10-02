@@ -6,6 +6,10 @@ pub const Terminal = @import("terminal.zig").Terminal;
 pub const files = @import("files.zig");
 pub const Files = files.Files;
 pub const Accounts = @import("accounts.zig").Accounts;
+pub const display = @import("display.zig");
+pub const Display = display.Display;
+pub const Event = @import("event.zig").Event;
+pub const Key = @import("event.zig").Key;
 pub const Request = abi.Request;
 pub const ApiError = error{ Denied, Invalid, Missing, Deadlock, Exhausted, Timeout, Busy };
 pub const ServiceError = ApiError || error{ Exists, Full };
@@ -153,6 +157,90 @@ pub fn dma() ApiError!Page {
         .physical = result.second,
 
     };
+
+}
+
+/// Physically contiguous memory that other processes may attach once lent to them.
+pub const Shared = struct {
+
+    handle: u64,
+    bytes: []align(4096) u8,
+
+    /// Zero unless the caller may program devices.
+    physical: u64,
+
+};
+
+pub fn share(pages: usize) ApiError!Shared {
+
+    return mapped(try checked(raw(.share, pages, 0, 0)));
+
+}
+
+/// Lets process `peer` attach `handle`.
+pub fn lend(handle: u64, peer: u64) ApiError!void {
+
+    _ = try checked(raw(.lend, handle, peer, 0));
+
+}
+
+pub fn attach(handle: u64) ApiError!Shared {
+
+    return mapped(try checked(raw(.attach, handle, 0, 0)));
+
+}
+
+pub fn detach(handle: u64) void {
+
+    _ = raw(.detach, handle, 0, 0);
+
+}
+
+fn mapped(result: Request) Shared {
+
+    return .{
+
+        .handle = result.second,
+        .bytes = @as([*]align(4096) u8, @ptrFromInt(result.first))[0 .. result.third * 4096],
+        .physical = result.fourth,
+
+    };
+
+}
+
+/// Whether process `id` still exists.
+pub fn alive(id: u64) bool {
+
+    return raw(.alive, id, 0, 0).number == 0;
+
+}
+
+/// Maps `size` bytes of granted device memory at `base` as one consecutive range.
+pub fn map(base: u64, size: u64) ApiError![*]u8 {
+
+    const page = base & ~@as(u64, 4095);
+    const first = (try checked(raw(.map, page, 0, 0))).first;
+    var offset: u64 = 4096;
+
+    while (offset < base + size - page) : (offset += 4096) {
+
+        if ((try checked(raw(.map, page + offset, 0, 0))).first != first + offset) return error.Exhausted;
+
+    }
+
+    return @ptrFromInt(first + base % 4096);
+
+}
+
+pub fn in32(port: u64) ApiError!u32 {
+
+    return @intCast((try checked(raw(.port, port, 2, 0))).first);
+
+}
+
+pub fn out32(port: u64, value: u32) ApiError!void {
+
+    _ = try checked(raw(.port, port, 3, value));
 
 }
 

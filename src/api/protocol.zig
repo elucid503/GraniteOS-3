@@ -33,6 +33,9 @@ pub const Operation = enum(u8) {
     password,
     install,
     power,
+    surface,
+    damage,
+    wait,
     _,
 
 };

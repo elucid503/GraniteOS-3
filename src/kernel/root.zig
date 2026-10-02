@@ -7,6 +7,7 @@ const process = @import("process.zig");
 const ipc = @import("ipc.zig");
 const check = @import("check.zig");
 const service = @import("service.zig");
+const shared = @import("shared.zig");
 const Log = @import("../debug/log.zig").Log;
 
 const options = @import("options");
@@ -159,6 +160,7 @@ pub fn reap() void {
         ipc.cancel(processes, task.id);
         service.revoke(task.id);
         service.departed(task.id);
+        shared.departed(task.id);
         link.* = task.next;
         task.destroy();
 

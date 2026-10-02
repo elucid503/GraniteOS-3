@@ -8,6 +8,7 @@ comptime {
 
     _ = @import("kernel/tests.zig");
     _ = @import("services/tests.zig");
+    _ = @import("gui/tests.zig");
 
 }
 

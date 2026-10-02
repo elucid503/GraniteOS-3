@@ -37,6 +37,11 @@ pub const Call = enum(u64) {
     shutdown = 23,
     assign = 24,
     variable = 25,
+    share = 26,
+    lend = 27,
+    attach = 28,
+    detach = 29,
+    alive = 30,
     _,
 
 };
@@ -66,6 +71,7 @@ pub const Image = enum(u64) {
     install,
     display,
     input,
+    login,
 
 };
 
@@ -115,11 +121,23 @@ pub const nobody = Identity{
 
 pub const permission_count = @typeInfo(Permission).@"enum".fields.len;
 
+/// A PCI base address range granted to a driver service.
+pub const Bar = extern struct {
+
+    base: u64 = 0,
+    size: u64 = 0,
+    ports: bool = false,
+
+};
+
 pub const Environment = extern struct {
 
     version: u64 = 1,
     layer: Layer,
     length: u64,
     permissions: [permission_count]Permission,
+
+    /// The PCI function a driver service was granted, by BAR index; unused entries are empty.
+    bars: [6]Bar = [_]Bar{.{}} ** 6,
 
 };

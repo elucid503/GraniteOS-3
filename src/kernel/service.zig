@@ -11,6 +11,8 @@ var restarting = false;
 var attempts: u8 = 0;
 var due: u64 = 0;
 var controller: ?pci.Bar = null;
+var adapter: ?[3]pci.Bar = null;
+var probed = false;
 
 pub fn start() !void {
 
@@ -95,13 +97,22 @@ pub fn spawn(owner: *process.Process, image: abi.Image, argument: u64) !u64 {
         .install => @embedFile("install"),
         .display => @embedFile("display"),
         .input => @embedFile("input"),
+        .login => @embedFile("login"),
 
     };
 
     // AHCI: mass storage, SATA, AHCI 1.0; ABAR is BAR 5.
-    if (image == .storage and controller == null) controller = pci.find(0x010601, 5);
+    if (image == .storage and controller == null) controller = if (pci.find(.{ .class = 0x010601 })) |at| pci.bar(at, 5) else null;
     if (image == .storage and controller == null) return error.NoDevice;
-    if (image == .display and root.framebuffer == null) return error.NoDevice;
+
+    if (image == .display and !probed) {
+
+        probed = true;
+        adapter = svga();
+
+    }
+
+    if (image == .display and root.framebuffer == null and adapter == null) return error.NoDevice;
 
     const task = try root.spawn(bytes, argument, owner.home);
     errdefer task.state = .dead;
@@ -178,19 +189,39 @@ pub fn spawn(owner: *process.Process, image: abi.Image, argument: u64) !u64 {
         },
         .display => {
 
-            const screen = root.framebuffer.?;
-            const page = screen.base & ~@as(u64, 4095);
-
             try task.configure(.service, &.{
 
-                .ipc, .time, .memory, .mmio, .diagnostics
+                .ipc, .time, .memory, .mmio, .ports, .dma, .diagnostics
 
             });
-            try task.grant(.mmio, page, std.mem.alignForward(u64, screen.base + @as(u64, screen.stride) * screen.height * 4, 4096) - page);
             try task.grant(.log, 0, 1);
-            task.context.frame.rsi = screen.base;
-            task.context.frame.rcx = screen.width | @as(u64, screen.height) << 16 | @as(u64, screen.stride) << 32;
-            task.context.frame.r8 = @ctz(screen.red_mask) | @as(u64, @ctz(screen.green_mask)) << 8 | @as(u64, @ctz(screen.blue_mask)) << 16;
+
+            if (root.framebuffer) |screen| {
+
+                const page = screen.base & ~@as(u64, 4095);
+
+                try task.grant(.mmio, page, std.mem.alignForward(u64, screen.base + @as(u64, screen.stride) * screen.height * 4, 4096) - page);
+                task.context.frame.rsi = screen.base;
+                task.context.frame.rcx = screen.width | @as(u64, screen.height) << 16 | @as(u64, screen.stride) << 32;
+                task.context.frame.r8 = @ctz(screen.red_mask) | @as(u64, @ctz(screen.green_mask)) << 8 | @as(u64, @ctz(screen.blue_mask)) << 16;
+
+            }
+
+            // Screen objects keep VRAM on the device side, so only the ports and command FIFO are granted.
+            if (adapter) |bars| {
+
+                try task.grant(.port, bars[0].base, bars[0].size);
+                try task.grant(.mmio, bars[2].base, bars[2].size);
+
+                for (bars, 0..) |entry, index| task.environment.bars[index] = .{
+
+                    .base = entry.base,
+                    .size = entry.size,
+                    .ports = entry.ports,
+
+                };
+
+            }
 
         },
         .input => {
@@ -205,7 +236,7 @@ pub fn spawn(owner: *process.Process, image: abi.Image, argument: u64) !u64 {
             try task.grant(.log, 0, 1);
 
         },
-        .shell, .client => {
+        .shell, .client, .login => {
 
         },
 
@@ -216,6 +247,21 @@ pub fn spawn(owner: *process.Process, image: abi.Image, argument: u64) !u64 {
     try owner.grant(.send, task.id, 1);
 
     return task.id;
+
+}
+
+/// VMware SVGA II: I/O ports, VRAM, and command FIFO.
+fn svga() ?[3]pci.Bar {
+
+    const at = pci.find(.{ .id = 0x0405_15ad }) orelse return null;
+
+    return .{
+
+        pci.bar(at, 0) orelse return null,
+        pci.bar(at, 1) orelse return null,
+        pci.bar(at, 2) orelse return null,
+
+    };
 
 }
 

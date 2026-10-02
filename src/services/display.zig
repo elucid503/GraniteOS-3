@@ -1,129 +1,392 @@
 const std = @import("std");
 
-const canvas = @import("canvas.zig");
-const font = @import("font.zig");
+const svga = @import("svga.zig");
 
 const api = @import("api");
+const gui = @import("gui");
 
 const protocol = api.protocol;
+const theme = gui.theme;
 pub const panic = api.panic;
 
-const label = "Hello from GraniteOS 3";
+// ponytail: fixed 1280x800 on VMware; follow the host window or a settings choice later.
+const mode = gui.Rect{
 
-var scene: canvas.Canvas = undefined;
-var frame: [*]u32 = undefined;
-var stride: usize = 0;
-var pointer: canvas.Point = undefined;
+    .width = 1280,
+    .height = 800,
+
+};
+
+const arrow = [_]*const [12]u8{
+
+    "X...........",
+    "XX..........",
+    "XOX.........",
+    "XOOX........",
+    "XOOOX.......",
+    "XOOOOX......",
+    "XOOOOOX.....",
+    "XOOOOOOX....",
+    "XOOOOOOOX...",
+    "XOOOOOOOOX..",
+    "XOOOOOOOOOX.",
+    "XOOOOOOXXXXX",
+    "XOOOXOOX....",
+    "XOOX.XOOX...",
+    "XOX..XOOX...",
+    "XX....XOOX..",
+    "X.....XOOX..",
+    ".......XX...",
+
+};
+
+/// The boot framebuffer, drawn by the CPU with a software pointer.
+const Frame = struct {
+
+    pixels: [*]u32,
+    stride: usize,
+
+    /// Bit positions of red, green, and blue.
+    shifts: [3]u5,
+
+    fn present(self: *Frame, source: *const gui.Canvas, area: gui.Rect) void {
+
+        const visible = area.intersect(source.bounds()) orelse return;
+        var line: [256]u32 = undefined;
+        var y: usize = @intCast(visible.y);
+
+        while (y < visible.bottom()) : (y += 1) {
+
+            var x: usize = @intCast(visible.x);
+
+            // Composing in RAM writes each device pixel once, so the pointer never flickers.
+            while (x < visible.right()) {
+
+                const row = line[0..@min(line.len, @as(usize, @intCast(visible.right())) - x)];
+
+                for (row, source.pixels[y * source.width + x ..][0..row.len]) |*pixel, color| pixel.* = self.convert(color);
+                self.overlay(row, x, y);
+                @memcpy(self.pixels[y * self.stride + x ..][0..row.len], row);
+                x += row.len;
+
+            }
+
+        }
+
+    }
+
+    fn overlay(self: *Frame, row: []u32, x: usize, y: usize) void {
+
+        const line = @as(i64, @intCast(y)) - pointer.y;
+        if (line < 0 or line >= arrow.len) return;
+
+        for (arrow[@intCast(line)], 0..) |shape, column| {
+
+            const offset = pointer.x + @as(i64, @intCast(column)) - @as(i64, @intCast(x));
+            if (shape == '.' or offset < 0 or offset >= row.len) continue;
+
+            row[@intCast(offset)] = self.convert(if (shape == 'X') 0x000000 else 0xffffff);
+
+        }
+
+    }
+
+    fn convert(self: *const Frame, color: u32) u32 {
+
+        return (color >> 16 & 0xff) << self.shifts[0] | (color >> 8 & 0xff) << self.shifts[1] | (color & 0xff) << self.shifts[2];
+
+    }
+
+};
+
+const Screen = union(enum) {
+
+    svga: svga.Device,
+    frame: Frame,
+
+};
+
+/// Pixels a client shares with us, stacked with the others and fed its input.
+const Surface = struct {
+
+    client: u64 = 0,
+    memory: api.Shared = undefined,
+    canvas: gui.Canvas = undefined,
+    area: gui.Rect = .{},
+
+    events: [32]api.Event = undefined,
+    queued: usize = 0,
+    waiting: ?api.Request = null,
+
+};
+
+var screen: Screen = undefined;
+var back: gui.Canvas = undefined;
+
+var surfaces = [_]Surface{.{}} ** 8;
+var stack: [surfaces.len]usize = undefined;
+var depth: usize = 0;
+
+var pointer = gui.Point{};
+var buttons: u8 = 0;
 
 var input: u64 = 0;
 var retry: u64 = 0;
+var sweep: u64 = 0;
 var greeted = false;
 
 pub export fn app_main(_: usize, base: usize, environment: *const api.abi.Environment, geometry: usize, shifts: usize) callconv(.c) noreturn {
 
     api.start(environment, .service);
-    if (!api.permits(.mmio) or !api.permits(.memory) or api.permits(.ports) or api.permits(.management)) api.exit(2);
+    if (!api.permits(.memory) or api.permits(.management)) api.exit(2);
 
-    const width = geometry & 0xffff;
-    const height = geometry >> 16 & 0xffff;
+    const size = select(environment, base, geometry, shifts);
+    const count: usize = @intCast(size.width * size.height);
+    const pages = (count * 4 + 4095) / 4096;
+    const memory = api.share(pages) catch api.exit(3);
 
-    stride = geometry >> 32;
-    frame = @ptrFromInt(pages(.map, base, stride * height * 4));
-    scene = .{
+    back = .{
 
-        .pixels = @as([*]u32, @ptrFromInt(pages(.allocate, 0, width * height * 4)))[0 .. width * height],
-        .width = width,
-        .height = height,
-
-        .shifts = .{ @intCast(shifts & 0xff), @intCast(shifts >> 8 & 0xff), @intCast(shifts >> 16 & 0xff) },
+        .pixels = std.mem.bytesAsSlice(u32, memory.bytes[0 .. count * 4]),
+        .width = @intCast(size.width),
+        .height = @intCast(size.height),
 
     };
     pointer = .{
 
-        .x = @intCast(width / 2),
-        .y = @intCast(height / 2),
+        .x = @divTrunc(size.width, 2),
+        .y = @divTrunc(size.height, 2),
 
     };
 
-    paint();
-    scene.present(frame, stride, .{
+    switch (screen) {
 
-        .x = 0,
-        .y = 0,
-        .width = @intCast(width),
-        .height = @intCast(height),
+        .svga => |*device| {
 
-    }, pointer);
-    api.log("display: ready\n");
+            if (!device.bind(memory.physical, @intCast(pages), @intCast(size.width * 4))) api.exit(3);
+
+            var image: [arrow.len * arrow[0].len]u32 = undefined;
+
+            for (arrow, 0..) |row, y| {
+
+                for (row, 0..) |shape, x| image[y * row.len + x] = switch (shape) {
+
+                    'X' => 0xff000000,
+                    'O' => 0xffffffff,
+                    else => 0,
+
+                };
+
+            }
+
+            device.shape(&image, arrow[0].len, arrow.len, .{});
+            device.point(pointer);
+            api.log("display: ready (svga)\n");
+
+        },
+        .frame => api.log("display: ready (framebuffer)\n"),
+
+    }
+
+    compose(back.bounds());
 
     while (true) {
 
-        const request = api.receive(false) catch {
+        while (api.receive(false)) |request| {
 
-            // The supervisor blocks on our first reply, so asking it for input any sooner would deadlock.
-            if (greeted) track();
-            api.sleep(1);
-            continue;
+            const result = handle(request) orelse continue;
 
-        };
+            api.reply(request, result) catch {
 
-        const result: u64 = switch (protocol.operation(request.second)) {
+            };
+            greeted = true;
 
-            .hello => protocol.version,
-            .crash => if (request.first == api.raw(.owner, 0, 0, 0).first) fault() else protocol.invalid,
-            else => protocol.invalid,
+        } else |_| {
 
-        };
+        }
 
-        api.reply(request, result) catch {
+        // The supervisor blocks on our first reply, so asking it for input any sooner would deadlock.
+        if (greeted) poll();
+        if (api.ticks() >= sweep) prune();
 
-        };
-        greeted = true;
+        // ponytail: 10 ms polling; block on input interrupts once latency matters.
+        api.sleep(1);
 
     }
 
 }
 
-fn paint() void {
+fn select(environment: *const api.abi.Environment, base: usize, geometry: usize, shifts: usize) gui.Rect {
 
-    const face = font.Font.init(@embedFile("fonts/NimbusSans-Regular.ttf")) catch api.exit(3);
-    const scale = 32 / face.units;
-    const span: i32 = @intFromFloat(@ceil(face.measure(label, scale)));
-    const box = canvas.Rect{
+    if (svga.Device.init(&environment.bars, @intCast(mode.width), @intCast(mode.height))) |device| {
 
-        .x = @divTrunc(@as(i32, @intCast(scene.width)) - span - 96, 2),
-        .y = @divTrunc(@as(i32, @intCast(scene.height)) - 120, 2),
-        .width = span + 96,
-        .height = 120,
+        screen = .{
+
+            .svga = device,
+
+        };
+
+        return mode;
+
+    }
+
+    if (base == 0) api.exit(3);
+
+    const height = geometry >> 16 & 0xffff;
+    const stride = geometry >> 32;
+    const pixels = api.map(base, stride * height * 4) catch api.exit(3);
+
+    screen = .{
+
+        .frame = .{
+
+            .pixels = @ptrCast(@alignCast(pixels)),
+            .stride = stride,
+            .shifts = .{ @intCast(shifts & 0xff), @intCast(shifts >> 8 & 0xff), @intCast(shifts >> 16 & 0xff) },
+
+        },
 
     };
 
-    scene.fill(.{
+    return .{
 
-        .x = 0,
-        .y = 0,
-        .width = @intCast(scene.width),
-        .height = @intCast(scene.height),
+        .width = @intCast(geometry & 0xffff),
+        .height = @intCast(height),
 
-    }, 0x1f2933);
-    scene.fill(.{
-
-        .x = box.x - 1,
-        .y = box.y - 1,
-        .width = box.width + 2,
-        .height = box.height + 2,
-
-    }, 0x52606d);
-    scene.fill(box, 0xf5f7fa);
-
-    const baseline = box.y + @divTrunc(box.height + @as(i32, @intFromFloat(@as(f32, @floatFromInt(face.ascent + face.descent)) * scale)), 2);
-
-    scene.text(&face, label, scale, @floatFromInt(box.x + 48), baseline, 0x1f2933);
+    };
 
 }
 
-/// Moves the pointer by the motion since the last poll, re-presenting only the two areas it covered.
-fn track() void {
+/// Returns the reply, or null when the request waits for input.
+fn handle(request: api.Request) ?u64 {
+
+    const value = protocol.value(request.second);
+
+    return switch (protocol.operation(request.second)) {
+
+        .hello => protocol.version,
+        .info => back.width | back.height << 16,
+        .surface => attach(request, value),
+        .damage => damage(request, value),
+        .wait => wait(request, value),
+        .crash => if (request.first == api.raw(.owner, 0, 0, 0).first) fault() else protocol.invalid,
+        else => protocol.invalid,
+
+    };
+
+}
+
+fn attach(request: api.Request, region: u64) u64 {
+
+    const area = fetch(request) orelse return protocol.invalid;
+    if (area.width <= 0 or area.height <= 0 or area.width > 8192 or area.height > 8192) return protocol.invalid;
+
+    const index = for (surfaces, 0..) |surface, slot| {
+
+        if (surface.client == 0) break slot;
+
+    } else return protocol.full;
+
+    const memory = api.attach(region) catch return protocol.denied;
+    const count: usize = @intCast(area.width * area.height);
+
+    if (memory.bytes.len < count * 4) {
+
+        api.detach(memory.handle);
+        return protocol.invalid;
+
+    }
+
+    surfaces[index] = .{
+
+        .client = request.first,
+        .memory = memory,
+        .canvas = .{
+
+            .pixels = std.mem.bytesAsSlice(u32, memory.bytes[0 .. count * 4]),
+            .width = @intCast(area.width),
+            .height = @intCast(area.height),
+
+        },
+        .area = area,
+
+    };
+    stack[depth] = index;
+    depth += 1;
+
+    return index;
+
+}
+
+fn damage(request: api.Request, id: u64) u64 {
+
+    const surface = owned(request, id) orelse return protocol.invalid;
+    const area = fetch(request) orelse return protocol.invalid;
+    const changed = area.intersect(surface.canvas.bounds()) orelse return 0;
+
+    compose(.{
+
+        .x = changed.x + surface.area.x,
+        .y = changed.y + surface.area.y,
+        .width = changed.width,
+        .height = changed.height,
+
+    });
+
+    return 0;
+
+}
+
+fn wait(request: api.Request, id: u64) ?u64 {
+
+    const surface = owned(request, id) orelse return protocol.invalid;
+
+    surface.waiting = request;
+    deliver(surface);
+
+    return null;
+
+}
+
+/// Redraws `area` of the screen from the surface stack, bottom to top.
+fn compose(area: gui.Rect) void {
+
+    const visible = area.intersect(back.bounds()) orelse return;
+
+    switch (screen) {
+
+        .svga => |*device| device.idle(),
+        .frame => {
+
+        },
+
+    }
+
+    back.fill(visible, theme.background);
+
+    for (stack[0..depth]) |index| {
+
+        const surface = &surfaces[index];
+
+        back.blit(&surface.canvas, .{
+
+            .x = surface.area.x,
+            .y = surface.area.y,
+
+        }, visible);
+
+    }
+
+    switch (screen) {
+
+        .svga => |*device| device.present(visible),
+        .frame => |*frame| frame.present(&back, visible),
+
+    }
+
+}
+
+fn poll() void {
 
     if (input == 0) {
 
@@ -133,46 +396,240 @@ fn track() void {
 
     }
 
-    const motion = api.call(input, protocol.pack(.read, 0)) catch {
+    var events: [32]api.Event = undefined;
+    const count = api.exchange(input, protocol.pack(.read, 0), std.mem.sliceAsBytes(&events)) catch {
 
         input = 0;
         return;
 
     };
 
-    const dx: i16 = @bitCast(@as(u16, @truncate(motion)));
-    const dy: i16 = @bitCast(@as(u16, @truncate(motion >> 16)));
+    if (count > events.len) return;
+    for (events[0..count]) |event| route(event);
 
-    if (motion == protocol.invalid or dx == 0 and dy == 0) return;
+    for (&surfaces) |*surface| {
+
+        if (surface.client != 0) deliver(surface);
+
+    }
+
+}
+
+fn route(event: api.Event) void {
+
+    switch (event.kind) {
+
+        .key => if (depth != 0) queue(&surfaces[stack[depth - 1]], event),
+        .motion => {
+
+            if (event.x != 0 or event.y != 0) move(event.x, event.y);
+
+            const target = under(pointer);
+            const changed = buttons ^ event.code;
+
+            if (target) |surface| queue(surface, local(surface, .{
+
+                .kind = .pointer,
+                .code = event.code,
+
+            }));
+
+            for (0..3) |button| {
+
+                if (changed >> @intCast(button) & 1 == 0) continue;
+
+                const pressed = event.code >> @intCast(button) & 1 != 0;
+                const surface = target orelse continue;
+
+                if (pressed and button == 0) raise(surface);
+                queue(surface, local(surface, .{
+
+                    .kind = .button,
+                    .pressed = pressed,
+                    .code = @intCast(button),
+
+                }));
+
+            }
+
+            buttons = event.code;
+
+        },
+        else => {
+
+        },
+
+    }
+
+}
+
+fn move(dx: i16, dy: i16) void {
 
     const previous = pointer;
 
     pointer = .{
 
-        .x = std.math.clamp(pointer.x + dx, 0, @as(i32, @intCast(scene.width)) - 1),
-        .y = std.math.clamp(pointer.y - dy, 0, @as(i32, @intCast(scene.height)) - 1),
+        .x = std.math.clamp(pointer.x + dx, 0, @as(i32, @intCast(back.width)) - 1),
+        .y = std.math.clamp(pointer.y + dy, 0, @as(i32, @intCast(back.height)) - 1),
 
     };
-    scene.present(frame, stride, canvas.cursor(previous), pointer);
-    scene.present(frame, stride, canvas.cursor(pointer), pointer);
 
-}
+    switch (screen) {
 
-/// Maps `size` bytes as consecutive pages starting at `base`, through `.map` (device memory) or `.allocate` (fresh RAM).
-fn pages(call: api.abi.Call, base: usize, size: usize) usize {
+        .svga => |*device| device.point(pointer),
+        .frame => |*frame| {
 
-    const page = base & ~@as(usize, 4095);
-    const first = (api.checked(api.raw(call, page, 0, 0)) catch api.exit(3)).first;
-    var offset: usize = 4096;
+            frame.present(&back, footprint(previous));
+            frame.present(&back, footprint(pointer));
 
-    while (offset < base + size - page) : (offset += 4096) {
-
-        const next = api.checked(api.raw(call, page + offset, 0, 0)) catch api.exit(3);
-        if (next.first != first + offset) api.exit(3);
+        },
 
     }
 
-    return first + base % 4096;
+}
+
+fn queue(surface: *Surface, event: api.Event) void {
+
+    // Only the latest position matters, so consecutive moves collapse.
+    if (event.kind == .pointer and surface.queued != 0 and surface.events[surface.queued - 1].kind == .pointer) {
+
+        surface.events[surface.queued - 1] = event;
+        return;
+
+    }
+
+    if (surface.queued == surface.events.len) return;
+
+    surface.events[surface.queued] = event;
+    surface.queued += 1;
+
+}
+
+fn deliver(surface: *Surface) void {
+
+    const request = surface.waiting orelse return;
+    if (surface.queued == 0) return;
+
+    surface.waiting = null;
+
+    // A timed-out wait keeps its event for the next one.
+    api.reply(request, @bitCast(surface.events[0])) catch |err| {
+
+        if (err == error.Missing) close(surface);
+        return;
+
+    };
+
+    std.mem.copyForwards(api.Event, surface.events[0 .. surface.queued - 1], surface.events[1..surface.queued]);
+    surface.queued -= 1;
+
+}
+
+fn raise(surface: *Surface) void {
+
+    const index = (@intFromPtr(surface) - @intFromPtr(&surfaces)) / @sizeOf(Surface);
+    const position = std.mem.indexOfScalar(usize, stack[0..depth], index) orelse return;
+
+    if (position == depth - 1) return;
+
+    std.mem.copyForwards(usize, stack[position .. depth - 1], stack[position + 1 .. depth]);
+    stack[depth - 1] = index;
+    compose(surface.area);
+
+}
+
+fn close(surface: *Surface) void {
+
+    const index = (@intFromPtr(surface) - @intFromPtr(&surfaces)) / @sizeOf(Surface);
+    const position = std.mem.indexOfScalar(usize, stack[0..depth], index) orelse return;
+    const area = surface.area;
+
+    std.mem.copyForwards(usize, stack[position .. depth - 1], stack[position + 1 .. depth]);
+    depth -= 1;
+    api.detach(surface.memory.handle);
+    surface.* = .{};
+    compose(area);
+
+}
+
+/// Drops the surfaces of clients that exited.
+fn prune() void {
+
+    sweep = api.ticks() + 100;
+
+    for (&surfaces) |*surface| {
+
+        if (surface.client != 0 and !api.alive(surface.client)) close(surface);
+
+    }
+
+}
+
+fn under(at: gui.Point) ?*Surface {
+
+    var position = depth;
+
+    while (position > 0) {
+
+        position -= 1;
+
+        const surface = &surfaces[stack[position]];
+        if (surface.area.contains(at)) return surface;
+
+    }
+
+    return null;
+
+}
+
+fn owned(request: api.Request, id: u64) ?*Surface {
+
+    if (id >= surfaces.len) return null;
+
+    const surface = &surfaces[id];
+
+    return if (surface.client != 0 and surface.client == request.first) surface else null;
+
+}
+
+fn local(surface: *const Surface, event: api.Event) api.Event {
+
+    var result = event;
+
+    result.x = @intCast(pointer.x - surface.area.x);
+    result.y = @intCast(pointer.y - surface.area.y);
+
+    return result;
+
+}
+
+fn fetch(request: api.Request) ?gui.Rect {
+
+    var area = api.display.Area{};
+
+    api.fetch(request, 0, std.mem.asBytes(&area)) catch return null;
+
+    return .{
+
+        .x = area.x,
+        .y = area.y,
+        .width = area.width,
+        .height = area.height,
+
+    };
+
+}
+
+fn footprint(at: gui.Point) gui.Rect {
+
+    return .{
+
+        .x = at.x,
+        .y = at.y,
+        .width = arrow[0].len,
+        .height = arrow.len,
+
+    };
 
 }
 

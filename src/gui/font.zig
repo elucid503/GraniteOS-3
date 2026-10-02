@@ -31,6 +31,16 @@ const Vector = struct {
 
 var area: [160 * 160]f32 = undefined;
 var points: [512]Point = undefined;
+var embedded: ?Font = null;
+
+/// Nimbus Sans, a metric-compatible Helvetica; the embedded file is known to parse.
+pub fn sans() *const Font {
+
+    if (embedded == null) embedded = Font.init(@embedFile("fonts/NimbusSans-Regular.ttf")) catch unreachable;
+
+    return &embedded.?;
+
+}
 
 /// A TrueType font with glyph outlines; parses tables in place without allocating.
 pub const Font = struct {

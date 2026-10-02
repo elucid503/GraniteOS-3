@@ -97,11 +97,36 @@ pub fn build(b: *std.Build) void {
 
     });
 
+    const gui = b.createModule(.{
+
+        .root_source_file = b.path("src/gui/root.zig"),
+        .target = application.root_module.resolved_target,
+        .optimize = optimize,
+        .red_zone = false,
+        .stack_check = false,
+        .stack_protector = false,
+        .code_model = .large,
+
+    });
+    gui.addImport("api", api);
+
+    const apps = [_][]const u8{
+
+        "shell", "client", "login",
+
+    };
+
     for ([_][]const u8{
 
-        "supervisor", "serial", "helper", "storage", "files", "accounts", "install", "display", "input", "shell", "client",
+        "supervisor", "serial", "helper", "storage", "files", "accounts", "install", "display", "input",
 
-    }) |name| {
+    } ++ apps) |name| {
+
+        const app = for (apps) |entry| {
+
+            if (std.mem.eql(u8, entry, name)) break true;
+
+        } else false;
 
         const program = b.addExecutable(.{
 
@@ -112,7 +137,7 @@ pub fn build(b: *std.Build) void {
 
                 .root_source_file = b.path(b.fmt("src/{s}/{s}.zig", .{
 
-                    if (std.mem.eql(u8, name, "shell") or std.mem.eql(u8, name, "client")) "apps" else "services", name,
+                    if (app) "apps" else "services", name,
 
                 })),
                 .target = application.root_module.resolved_target,
@@ -127,6 +152,7 @@ pub fn build(b: *std.Build) void {
         });
 
         program.root_module.addImport("api", api);
+        program.root_module.addImport("gui", gui);
         program.root_module.addOptions("options", options);
         program.root_module.addAssemblyFile(b.path("src/user/asm/entry.S"));
         program.setLinkerScript(b.path("src/user/asm/link.ld"));

@@ -6,10 +6,11 @@ const process = @import("process.zig");
 const ipc = @import("ipc.zig");
 const abi = @import("abi.zig");
 const service = @import("service.zig");
+const shared = @import("shared.zig");
 const firmware = @import("../boot/uefi/variable.zig");
 
 const paging = arch.paging;
-const CallError = paging.MapError || ipc.IpcError || @import("elf.zig").LoadError || error{ Denied, Invalid, Busy, ProcessIdsExhausted, InvalidProcessor, NoDevice };
+const CallError = paging.MapError || ipc.IpcError || shared.SharedError || @import("elf.zig").LoadError || error{ Denied, Invalid, Busy, ProcessIdsExhausted, InvalidProcessor, NoDevice };
 
 pub fn handle(task: *process.Process, ticks: u64) void {
 
@@ -98,12 +99,22 @@ fn invoke(task: *process.Process, ticks: u64, frame: *abi.Request) CallError!voi
         },
         .port => {
 
-            if (frame.first > 65535 or frame.second > 1 or frame.third > 255) return error.Invalid;
-            if (!task.permits(.port, frame.first, 1)) return error.Denied;
+            // Bit 0 of `second` selects a write, bit 1 a 32-bit access.
+            const width: u64 = if (frame.second & 2 != 0) 4 else 1;
+
+            if (frame.first > 65535 or frame.second > 3 or frame.third >> @intCast(width * 8) != 0) return error.Invalid;
+            if (!task.permits(.port, frame.first, width)) return error.Denied;
 
             const port: u16 = @intCast(frame.first);
 
-            if (frame.second == 0) frame.first = arch.cpu.in(port) else arch.cpu.out(port, @intCast(frame.third));
+            switch (frame.second) {
+
+                0 => frame.first = arch.cpu.in(port),
+                1 => arch.cpu.out(port, @intCast(frame.third)),
+                2 => frame.first = arch.cpu.in32(port),
+                else => arch.cpu.out32(port, @intCast(frame.third)),
+
+            }
 
         },
         .map => {
@@ -260,6 +271,33 @@ fn invoke(task: *process.Process, ticks: u64, frame: *abi.Request) CallError!voi
 
             if (frame.fifth == 0) try copyUser(task, frame.third, bytes[0..size], true);
             frame.first = size;
+
+        },
+        .share, .attach => {
+
+            if (!task.policy.permits(.memory)) return error.Denied;
+
+            const region = if (number == @intFromEnum(abi.Call.share)) try shared.create(task, frame.first) else try shared.attach(task, frame.first);
+
+            frame.first = region.address;
+            frame.second = region.handle;
+            frame.third = region.pages;
+
+            // Only drivers learn where the memory physically lives.
+            frame.fourth = if (task.policy.permits(.dma)) region.physical else 0;
+
+        },
+        .lend => {
+
+            if (!task.policy.permits(.memory)) return error.Denied;
+            try shared.lend(task, frame.first, frame.second);
+
+        },
+        .detach => try shared.detach(task, frame.first),
+        .alive => {
+
+            if (!task.policy.permits(.ipc)) return error.Denied;
+            _ = ipc.find(root.processes, frame.first) orelse return error.NoProcess;
 
         },
         else => return error.Invalid,
